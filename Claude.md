@@ -2,10 +2,10 @@
 
 ## Project Overview
 
-**Embedded Raptor** is a lightweight embedding database built for the Bun runtime that
-stores text embeddings in an append-only JSONL file format. It provides semantic
-search capabilities using cosine similarity with the BGE-Base-EN embedding model
-(768 dimensions).
+**Embedded Raptor** is a lightweight embedding database built for the Bun
+runtime that stores text embeddings in an append-only JSONL file format. It
+provides semantic search capabilities using cosine similarity with the
+BGE-Base-EN embedding model (768 dimensions).
 
 **Key Features:**
 

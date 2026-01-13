@@ -16,6 +16,8 @@ export interface StoreOptions {
 
 export interface EngineOptions {
   storePath: string
+  /** Directory to cache downloaded models (default: ./.cache/models) */
+  cacheDir?: string
 }
 
 export interface PackageJson {

@@ -31,6 +31,7 @@ export default defineConfig({
     'cleye',
     'fastembed',
     'tiny-invariant',
-    '@xenova/transformers'
+    '@xenova/transformers',
+    'node-llama-cpp'
   ]
 })

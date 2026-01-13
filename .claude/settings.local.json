@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(bun remove:*)",
+      "Bash(bun add:*)",
+      "WebFetch(domain:node-llama-cpp.withcat.ai)",
+      "Bash(bun run typecheck:*)",
+      "Bash(bun run test)",
+      "Bash(bun run benchmark:quick)",
+      "Bash(bun run lint:*)",
+      "Bash(bun:*)"
+    ]
+  }
+}
