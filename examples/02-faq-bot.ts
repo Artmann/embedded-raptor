@@ -154,6 +154,7 @@ async function main() {
 
   // Cleanup
   console.log('\n🧹 Cleaning up...')
+  await engine.dispose()
   await unlink(dbPath).catch(() => {})
   console.log('✓ Done!')
 }

@@ -9,16 +9,16 @@
 > A lightweight semantic search database with text embeddings for Node.js and
 > Bun
 
-Embedded Raptor lets you build semantic search into your applications with just a few
-lines of code. Store text, search by meaning, and find similar content—perfect
-for RAG systems, chatbots, and recommendation engines.
+Embedded Raptor lets you build semantic search into your applications with just
+a few lines of code. Store text, search by meaning, and find similar
+content—perfect for RAG systems, chatbots, and recommendation engines.
 
 ## What is Embedded Raptor?
 
-Embedded Raptor is an embedding database that automatically converts text into vector
-embeddings and stores them in an efficient binary format. Instead of searching
-by exact keywords, you can search by semantic similarity—finding documents that
-mean the same thing, even if they use different words.
+Embedded Raptor is an embedding database that automatically converts text into
+vector embeddings and stores them in an efficient binary format. Instead of
+searching by exact keywords, you can search by semantic similarity—finding
+documents that mean the same thing, even if they use different words.
 
 **Example:** Search for "how to reset password" and find results like "forgot my
 login credentials" or "change account password".
@@ -203,12 +203,12 @@ raptor store key1 "Some text" --storePath ./data/custom.raptor
 
 ## How It Works
 
-1. **Text → Embeddings**: Embedded Raptor uses the BGE-Base-EN model to convert text into
-   768-dimensional vector embeddings
+1. **Text → Embeddings**: Embedded Raptor uses the BGE-Base-EN model to convert
+   text into 768-dimensional vector embeddings
 2. **Storage**: Embeddings are stored in an efficient binary format (.raptor
    files)
-3. **Search**: When you search, Embedded Raptor compares your query embedding against all
-   stored embeddings using cosine similarity
+3. **Search**: When you search, Embedded Raptor compares your query embedding
+   against all stored embeddings using cosine similarity
 4. **Results**: Returns the most similar results ranked by similarity score
 
 **Embedding Model**:

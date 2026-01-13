@@ -1,8 +1,10 @@
 import {
-  type FeatureExtractionPipeline,
-  env,
-  pipeline
-} from '@xenova/transformers'
+  getLlama,
+  resolveModelFile,
+  type Llama,
+  type LlamaModel,
+  type LlamaEmbeddingContext
+} from 'node-llama-cpp'
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -13,46 +15,93 @@ import { writeHeader, writeRecord, writeRecords } from './binary-format'
 import { CandidateSet } from './candidate-set'
 import type { EmbeddingEntry, EngineOptions, SearchResult } from './types'
 
+// Model URI for bge-small-en-v1.5 GGUF (384 dimensions, ~67MB)
+const DEFAULT_MODEL_URI =
+  'hf:CompendiumLabs/bge-small-en-v1.5-gguf/bge-small-en-v1.5-q8_0.gguf'
+const DEFAULT_CACHE_DIR = './.cache/models'
+
 export class EmbeddingEngine {
   private fileReader: BinaryFileReader
   private storePath: string
-  private extractor?: FeatureExtractionPipeline
+  private cacheDir: string
+  private llama?: Llama
+  private model?: LlamaModel
+  private embeddingContext?: LlamaEmbeddingContext
+  private initPromise?: Promise<void>
 
   constructor(options: EngineOptions) {
     this.storePath = options.storePath
     this.fileReader = new BinaryFileReader(options.storePath)
-
-    env.cacheDir = './.cache'
+    this.cacheDir = options.cacheDir ?? DEFAULT_CACHE_DIR
   }
 
   /**
    * Gets or initializes the embedding model
    * Caches the model instance to avoid repeated initialization overhead
-   * @returns Initialized feature extraction pipeline
    */
-  private async getOrInitModel(): Promise<FeatureExtractionPipeline> {
-    this.extractor ??= await pipeline(
-      'feature-extraction',
-      'Xenova/bge-small-en-v1.5'
-    )
+  private async ensureModelLoaded(): Promise<void> {
+    if (this.embeddingContext) {
+      return
+    }
 
-    return this.extractor
+    // Prevent concurrent initialization
+    if (this.initPromise) {
+      return this.initPromise
+    }
+
+    this.initPromise = this.initializeModel()
+    await this.initPromise
+  }
+
+  private async initializeModel(): Promise<void> {
+    this.llama = await getLlama()
+
+    const modelPath = await resolveModelFile(DEFAULT_MODEL_URI, this.cacheDir)
+
+    this.model = await this.llama.loadModel({
+      modelPath
+    })
+
+    this.embeddingContext = await this.model.createEmbeddingContext()
   }
 
   /**
-   * Generates embedding from text using Transformers.js bge-small-en-v1.5 model
+   * Truncates text to fit within the model's context size
+   * Uses the model's tokenizer for accurate token counting
+   * BGE-small supports 512 tokens, we use 500 to leave room for special tokens
+   */
+  private truncateToContextSize(text: string): string {
+    if (!this.model) {
+      // Fallback if model not loaded yet
+      const maxChars = 300 * 3
+      return text.length <= maxChars ? text : text.slice(0, maxChars)
+    }
+
+    const maxTokens = 500
+    const tokens = this.model.tokenize(text)
+
+    if (tokens.length <= maxTokens) {
+      return text
+    }
+
+    // Truncate tokens and detokenize
+    const truncatedTokens = tokens.slice(0, maxTokens)
+    return this.model.detokenize(truncatedTokens)
+  }
+
+  /**
+   * Generates embedding from text using node-llama-cpp with bge-small-en-v1.5 model
    * @param text - Text to embed
    * @returns 384-dimensional embedding vector (normalized)
    */
   async generateEmbedding(text: string): Promise<number[]> {
-    const extractor = await this.getOrInitModel()
+    await this.ensureModelLoaded()
+    invariant(this.embeddingContext, 'Embedding context not initialized')
 
-    const output = await extractor(text, {
-      pooling: 'mean',
-      normalize: true
-    })
+    const truncatedText = this.truncateToContextSize(text)
+    const embedding = await this.embeddingContext.getEmbeddingFor(truncatedText)
 
-    return Array.from(output.data) as number[]
+    return Array.from(embedding.vector)
   }
 
   /**
@@ -146,40 +195,24 @@ export class EmbeddingEngine {
   /**
    * Stores multiple text embeddings in batch
    * More efficient than calling store() multiple times
-   * Generates embeddings in a single batch and writes all records at once
+   * Generates embeddings in parallel and writes all records at once
    * @param items - Array of {key, text} objects to store
    */
   async storeMany(items: Array<{ key: string; text: string }>): Promise<void> {
     invariant(items.length > 0, 'Items array must not be empty.')
 
-    const texts = items.map((item) => item.text)
+    await this.ensureModelLoaded()
+    const embeddingContext = this.embeddingContext
+    invariant(embeddingContext, 'Embedding context not initialized')
 
-    const extractor = await this.getOrInitModel()
-
-    const output = await extractor(texts, {
-      pooling: 'mean',
-      normalize: true
+    // Generate embeddings in parallel
+    const embeddingPromises = items.map(async (item) => {
+      const truncatedText = this.truncateToContextSize(item.text)
+      const embedding = await embeddingContext.getEmbeddingFor(truncatedText)
+      return Array.from(embedding.vector)
     })
 
-    const batchSize = output.dims[0]
-    const embeddingDim = output.dims[1]
-
-    const embeddingsList: number[][] = []
-
-    for (let i = 0; i < batchSize; i++) {
-      const start = i * embeddingDim
-      const end = start + embeddingDim
-
-      const data = Array.from(output.data) as number[]
-
-      embeddingsList.push(data.slice(start, end))
-    }
-
-    // Ensure we got the right number of embeddings
-    invariant(
-      embeddingsList.length === items.length,
-      'Number of embeddings must match number of items.'
-    )
+    const embeddingsList = await Promise.all(embeddingPromises)
 
     const dir = dirname(this.storePath)
     await mkdir(dir, { recursive: true })
@@ -233,7 +266,16 @@ export class EmbeddingEngine {
    * Disposes of the cached embedding model and releases resources
    * Call this when you're done using the engine to free up memory
    */
-  dispose(): void {
-    this.extractor = undefined
+  async dispose(): Promise<void> {
+    if (this.embeddingContext) {
+      await this.embeddingContext.dispose()
+      this.embeddingContext = undefined
+    }
+    if (this.model) {
+      await this.model.dispose()
+      this.model = undefined
+    }
+    this.llama = undefined
+    this.initPromise = undefined
   }
 }
