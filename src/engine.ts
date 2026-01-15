@@ -1,5 +1,6 @@
 import {
   getLlama,
+  LlamaLogLevel,
   resolveModelFile,
   type Llama,
   type LlamaModel,
@@ -83,7 +84,9 @@ export class EmbeddingEngine {
   }
 
   private async initializeModel(): Promise<void> {
-    this.llama = await getLlama()
+    this.llama = await getLlama({
+      logLevel: LlamaLogLevel.error // Suppress tokenizer warnings for embedding models
+    })
 
     const modelPath = await resolveModelFile(defaultModelUri, this.cacheDir)
 
