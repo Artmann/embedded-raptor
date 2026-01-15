@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { EmbeddingEngine } from './engine'
-import { unlink, mkdir, stat } from 'node:fs/promises'
+import { unlink, mkdir, stat, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { readHeader } from './binary-format'
 
 describe('EmbeddingEngine', () => {
   const testStorePath = './test-data/test-embeddings.raptor'
+  const testWalPath = './test-data/test-embeddings.raptor-wal'
+  const testLockPath = './test-data/test-embeddings.raptor.lock'
   let engine: EmbeddingEngine
 
   beforeEach(async () => {
@@ -22,26 +23,35 @@ describe('EmbeddingEngine', () => {
   })
 
   afterEach(async () => {
-    // Clean up test file
+    // Dispose engine first to release file locks
+    try {
+      await engine.dispose()
+    } catch {
+      // Ignore errors
+    }
+
+    // Clean up test files
     try {
       if (existsSync(testStorePath)) {
         await unlink(testStorePath)
       }
+      if (existsSync(testWalPath)) {
+        await unlink(testWalPath)
+      }
+      if (existsSync(testLockPath)) {
+        await rm(testLockPath, { force: true })
+      }
     } catch {
-      // Ignore errors if file doesn't exist
+      // Ignore errors if files don't exist
     }
   })
 
   describe('store', () => {
-    it('should create binary file with header on first store', async () => {
+    it('should create data and WAL files on first store', async () => {
       await engine.store('doc1', 'Hello world')
 
       expect(existsSync(testStorePath)).toBe(true)
-
-      // Verify header was written
-      const header = await readHeader(testStorePath)
-      expect(header.version).toBe(1)
-      expect(header.dimension).toBe(384) // bge-small-en-v1.5 dimension
+      expect(existsSync(testWalPath)).toBe(true)
     })
 
     it('should store entry and retrieve it back', async () => {
@@ -54,12 +64,12 @@ describe('EmbeddingEngine', () => {
       expect(entry?.embedding.length).toBe(384)
     })
 
-    it('should store multiple entries in append-only format', async () => {
+    it('should store multiple entries', async () => {
       await engine.store('doc1', 'The quick brown fox')
       await engine.store('doc2', 'Machine learning is powerful')
       await engine.store('doc3', 'Bun is fast')
 
-      // Verify file size increased (header + 3 records)
+      // Verify file size increased
       const stats = await stat(testStorePath)
       expect(stats.size).toBeGreaterThan(16) // More than just header
 
@@ -73,7 +83,7 @@ describe('EmbeddingEngine', () => {
       expect(entry3?.key).toBe('doc3')
     })
 
-    it('should append entries with same key (deduplication happens on read)', async () => {
+    it('should update existing key (via WAL)', async () => {
       await engine.store('doc1', 'Original text')
       await engine.store('doc1', 'Updated text')
 
@@ -81,11 +91,9 @@ describe('EmbeddingEngine', () => {
       const entry = await engine.get('doc1')
       expect(entry?.key).toBe('doc1')
 
-      // File should contain both records (append-only)
-      const stats = await stat(testStorePath)
-      // Header (16) + 2 records, each record is 2 + keyLen + 384*4 + 4
-      const recordSize = 2 + 4 + 384 * 4 + 4 // key "doc1" = 4 bytes
-      expect(stats.size).toBeGreaterThanOrEqual(16 + recordSize * 2)
+      // Count should be 1 (not 2) due to update
+      const count = await engine.count()
+      expect(count).toBe(1)
     })
 
     it('should handle UTF-8 keys correctly', async () => {
@@ -106,8 +114,9 @@ describe('EmbeddingEngine', () => {
 
       await engine.storeMany(items)
 
-      // Verify file was created
+      // Verify files were created
       expect(existsSync(testStorePath)).toBe(true)
+      expect(existsSync(testWalPath)).toBe(true)
 
       // Verify all entries can be retrieved
       const entry1 = await engine.get('doc1')
@@ -117,22 +126,6 @@ describe('EmbeddingEngine', () => {
       expect(entry1?.key).toBe('doc1')
       expect(entry2?.key).toBe('doc2')
       expect(entry3?.key).toBe('doc3')
-    })
-
-    it('should create header on first storeMany', async () => {
-      const items = [
-        { key: 'doc1', text: 'Hello world' },
-        { key: 'doc2', text: 'Test content' }
-      ]
-
-      await engine.storeMany(items)
-
-      expect(existsSync(testStorePath)).toBe(true)
-
-      // Verify header was written
-      const header = await readHeader(testStorePath)
-      expect(header.version).toBe(1)
-      expect(header.dimension).toBe(384)
     })
 
     it('should generate embeddings for all items', async () => {
@@ -186,9 +179,6 @@ describe('EmbeddingEngine', () => {
 
       await engine.storeMany(items)
 
-      // Small delay to ensure file is flushed
-      await new Promise((resolve) => setTimeout(resolve, 50))
-
       const results = await engine.search('AI and ML', 3)
 
       expect(results.length).toBeGreaterThan(0)
@@ -213,7 +203,7 @@ describe('EmbeddingEngine', () => {
       expect(entry).toBeNull()
     })
 
-    it('should return most recent entry for duplicate keys', async () => {
+    it('should return most recent entry for updated keys', async () => {
       const text1 = 'First version content here'
       const text2 = 'Second version completely different text'
 
@@ -226,20 +216,100 @@ describe('EmbeddingEngine', () => {
       expect(entry?.key).toBe('doc1')
 
       // Verify it's the second version by checking the embedding
-      // (embeddings for different text should be different)
       const secondEmbedding = await engine.generateEmbedding(text2)
 
       // Check that retrieved embedding matches the second one
       expect(entry?.embedding[0]).toBeCloseTo(secondEmbedding[0])
     })
 
-    it('should handle empty file gracefully', async () => {
-      const newEngine = new EmbeddingEngine({
-        storePath: './test-data/empty.raptor'
-      })
-
-      const entry = await newEngine.get('anykey')
+    it('should handle empty database gracefully', async () => {
+      // No store calls, just query
+      const entry = await engine.get('anykey')
       expect(entry).toBeNull()
+    })
+  })
+
+  describe('delete', () => {
+    it('should delete an existing entry', async () => {
+      await engine.store('doc1', 'Test content')
+
+      expect(await engine.has('doc1')).toBe(true)
+
+      const deleted = await engine.delete('doc1')
+
+      expect(deleted).toBe(true)
+      expect(await engine.has('doc1')).toBe(false)
+      expect(await engine.get('doc1')).toBeNull()
+    })
+
+    it('should return false for non-existent key', async () => {
+      const deleted = await engine.delete('nonexistent')
+      expect(deleted).toBe(false)
+    })
+
+    it('should not affect other entries', async () => {
+      await engine.store('doc1', 'Content 1')
+      await engine.store('doc2', 'Content 2')
+
+      await engine.delete('doc1')
+
+      expect(await engine.has('doc2')).toBe(true)
+      expect(await engine.get('doc2')).not.toBeNull()
+    })
+  })
+
+  describe('has', () => {
+    it('should return true for existing key', async () => {
+      await engine.store('doc1', 'Test content')
+
+      expect(await engine.has('doc1')).toBe(true)
+    })
+
+    it('should return false for non-existent key', async () => {
+      expect(await engine.has('nonexistent')).toBe(false)
+    })
+  })
+
+  describe('keys', () => {
+    it('should return all keys', async () => {
+      await engine.store('doc1', 'Content 1')
+      await engine.store('doc2', 'Content 2')
+      await engine.store('doc3', 'Content 3')
+
+      const keys = await engine.keys()
+
+      expect(keys).toContain('doc1')
+      expect(keys).toContain('doc2')
+      expect(keys).toContain('doc3')
+      expect(keys.length).toBe(3)
+    })
+
+    it('should return empty array for empty database', async () => {
+      const keys = await engine.keys()
+      expect(keys).toEqual([])
+    })
+  })
+
+  describe('count', () => {
+    it('should return correct count', async () => {
+      expect(await engine.count()).toBe(0)
+
+      await engine.store('doc1', 'Content 1')
+      expect(await engine.count()).toBe(1)
+
+      await engine.store('doc2', 'Content 2')
+      expect(await engine.count()).toBe(2)
+    })
+
+    it('should reflect deleted entries', async () => {
+      await engine.store('doc1', 'Content 1')
+      await engine.store('doc2', 'Content 2')
+
+      expect(await engine.count()).toBe(2)
+
+      await engine.delete('doc1')
+
+      expect(await engine.count()).toBe(1)
     })
   })
 
@@ -251,8 +321,6 @@ describe('EmbeddingEngine', () => {
         'Machine learning is a subset of artificial intelligence'
       )
       await engine.store('doc3', 'Bun is a fast JavaScript runtime')
-      // Small delay to ensure file is flushed
-      await new Promise((resolve) => setTimeout(resolve, 50))
     })
 
     it('should find similar entries', async () => {
@@ -290,25 +358,35 @@ describe('EmbeddingEngine', () => {
       }
     })
 
-    it('should return empty array when no file exists', async () => {
-      const newEngine = new EmbeddingEngine({
-        storePath: './test-data/nonexistent.raptor'
+    it('should return empty array for empty database', async () => {
+      // Create a new engine with no data
+      const emptyEngine = new EmbeddingEngine({
+        storePath: './test-data/empty-search.raptor'
       })
 
-      const results = await newEngine.search('test', 5, 0.1)
-
-      expect(results).toEqual([])
+      try {
+        const results = await emptyEngine.search('test', 5, 0.1)
+        expect(results).toEqual([])
+      } finally {
+        await emptyEngine.dispose()
+        await rm('./test-data/empty-search.raptor', { force: true })
+        await rm('./test-data/empty-search.raptor-wal', { force: true })
+        await rm('./test-data/empty-search.raptor.lock', { force: true })
+      }
     })
 
-    it('should only return latest version of duplicate keys', async () => {
-      await engine.store('dup', 'artificial intelligence AI ML')
-      await engine.store('dup', 'cooking recipes food kitchen')
+    it('should not return deleted entries', async () => {
+      await engine.store('toDelete', 'artificial intelligence AI ML')
 
-      const results = await engine.search('machine learning', 10, 0)
+      const resultsBefore = await engine.search('machine learning', 10, 0)
+      const foundBefore = resultsBefore.some((r) => r.key === 'toDelete')
+      expect(foundBefore).toBe(true)
 
-      // Should only have one result for 'dup' (the latest version)
-      const dupResults = results.filter((r) => r.key === 'dup')
-      expect(dupResults.length).toBeLessThanOrEqual(1)
+      await engine.delete('toDelete')
+
+      const resultsAfter = await engine.search('machine learning', 10, 0)
+      const foundAfter = resultsAfter.some((r) => r.key === 'toDelete')
+      expect(foundAfter).toBe(false)
     })
   })
 })

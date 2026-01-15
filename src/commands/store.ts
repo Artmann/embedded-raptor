@@ -16,8 +16,12 @@ export const store = command(
       storePath: argv.flags.storePath
     })
 
-    const [key, text] = argv._
-    await engine.store(key, text)
-    console.log(`✓ Stored embedding for key: ${key}`)
+    try {
+      const [key, text] = argv._
+      await engine.store(key, text)
+      console.log(`Stored embedding for key: ${key}`)
+    } finally {
+      await engine.dispose()
+    }
   }
 )
