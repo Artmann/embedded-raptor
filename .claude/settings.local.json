@@ -10,7 +10,8 @@
       "Bash(bun run test)",
       "Bash(bun run benchmark:quick)",
       "Bash(bun run lint:*)",
-      "Bash(bun:*)"
+      "Bash(bun:*)",
+      "Bash(ls:*)"
     ]
   }
 }

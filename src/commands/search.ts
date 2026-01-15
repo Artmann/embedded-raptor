@@ -17,20 +17,24 @@ export const search = command(
       storePath: argv.flags.storePath
     })
 
-    const [query] = argv._
-    const results = await engine.search(
-      query,
-      argv.flags.limit,
-      argv.flags.minSimilarity
-    )
+    try {
+      const [query] = argv._
+      const results = await engine.search(
+        query,
+        argv.flags.limit,
+        argv.flags.minSimilarity
+      )
 
-    if (results.length === 0) {
-      console.log('No results found')
-    } else {
-      console.log(`Found ${results.length} result(s):\n`)
-      for (const result of results) {
-        console.log(`${result.key}: ${result.similarity.toFixed(6)}`)
+      if (results.length === 0) {
+        console.log('No results found')
+      } else {
+        console.log(`Found ${results.length} result(s):\n`)
+        for (const result of results) {
+          console.log(`${result.key}: ${result.similarity.toFixed(6)}`)
+        }
       }
+    } finally {
+      await engine.dispose()
     }
   }
 )

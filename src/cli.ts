@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { store, get, search } from './commands'
+import { store, get, search, deleteCmd } from './commands'
 import type { PackageJson } from './types'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -21,7 +21,7 @@ function main(): void {
       version: packageJson.version,
       description:
         'An embedding database CLI for storing and searching text indexes',
-      commands: [store, get, search]
+      commands: [store, get, search, deleteCmd]
     },
     () => {
       // When using commands with handlers, this callback is only called when no command is matched

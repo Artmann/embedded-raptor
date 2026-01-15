@@ -5,34 +5,63 @@ import {
   type LlamaModel,
   type LlamaEmbeddingContext
 } from 'node-llama-cpp'
-import { existsSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import invariant from 'tiny-invariant'
 
-import { BinaryFileReader } from './binary-file-reader'
-import { writeHeader, writeRecord, writeRecords } from './binary-format'
+import { StorageEngine, ensureV2Format, opType } from './storage-engine'
 import { CandidateSet } from './candidate-set'
 import type { EmbeddingEntry, EngineOptions, SearchResult } from './types'
 
 // Model URI for bge-small-en-v1.5 GGUF (384 dimensions, ~67MB)
-const DEFAULT_MODEL_URI =
+const defaultModelUri =
   'hf:CompendiumLabs/bge-small-en-v1.5-gguf/bge-small-en-v1.5-q8_0.gguf'
-const DEFAULT_CACHE_DIR = './.cache/models'
+const defaultCacheDir = './.cache/models'
+const defaultDimension = 384
 
 export class EmbeddingEngine {
-  private fileReader: BinaryFileReader
+  private storageEngine: StorageEngine | null = null
   private storePath: string
   private cacheDir: string
+  private dimension: number
   private llama?: Llama
   private model?: LlamaModel
   private embeddingContext?: LlamaEmbeddingContext
   private initPromise?: Promise<void>
+  private storageInitPromise?: Promise<StorageEngine>
 
   constructor(options: EngineOptions) {
     this.storePath = options.storePath
-    this.fileReader = new BinaryFileReader(options.storePath)
-    this.cacheDir = options.cacheDir ?? DEFAULT_CACHE_DIR
+    this.cacheDir = options.cacheDir ?? defaultCacheDir
+    this.dimension = defaultDimension
+  }
+
+  /**
+   * Gets or initializes the storage engine
+   * Performs migration from v1 format if needed
+   */
+  private async ensureStorageEngine(): Promise<StorageEngine> {
+    if (this.storageEngine) {
+      return this.storageEngine
+    }
+
+    // Prevent concurrent initialization
+    if (this.storageInitPromise) {
+      return this.storageInitPromise
+    }
+
+    this.storageInitPromise = this.initializeStorage()
+    this.storageEngine = await this.storageInitPromise
+    return this.storageEngine
+  }
+
+  private async initializeStorage(): Promise<StorageEngine> {
+    // Check and migrate from v1 format if needed
+    await ensureV2Format(this.storePath, this.dimension)
+
+    // Create storage engine
+    return StorageEngine.create({
+      dataPath: this.storePath,
+      dimension: this.dimension
+    })
   }
 
   /**
@@ -56,7 +85,7 @@ export class EmbeddingEngine {
   private async initializeModel(): Promise<void> {
     this.llama = await getLlama()
 
-    const modelPath = await resolveModelFile(DEFAULT_MODEL_URI, this.cacheDir)
+    const modelPath = await resolveModelFile(defaultModelUri, this.cacheDir)
 
     this.model = await this.llama.loadModel({
       modelPath
@@ -106,31 +135,46 @@ export class EmbeddingEngine {
 
   /**
    * Retrieves an embedding entry by key
-   * Reads the file in reverse order for efficiency (most recent first)
+   * O(1) lookup via in-memory index
    * @param key - Unique identifier for the entry
    * @returns The embedding entry, or null if not found
    */
   async get(key: string): Promise<EmbeddingEntry | null> {
     invariant(key, 'Key must be provided.')
 
-    if (!existsSync(this.storePath)) {
+    const storage = await this.ensureStorageEngine()
+    const record = await storage.readRecord(key)
+
+    if (!record) {
       return null
     }
 
-    for await (const entry of this.fileReader.entries()) {
-      if (entry.key === key) {
-        return entry
-      }
+    return {
+      key: record.key,
+      text: '', // Text is not stored in v2 format
+      embedding: Array.from(record.embedding),
+      timestamp: Number(record.sequenceNumber)
     }
+  }
 
-    return null
+  /**
+   * Checks if a key exists in the database
+   * O(1) lookup via in-memory index
+   * @param key - Unique identifier for the entry
+   * @returns true if the key exists, false otherwise
+   */
+  async has(key: string): Promise<boolean> {
+    invariant(key, 'Key must be provided.')
+
+    const storage = await this.ensureStorageEngine()
+    return storage.hasKey(key)
   }
 
   /**
    * Searches for similar embeddings using cosine similarity
    * @param query - Text query to search for
    * @param limit - Maximum number of results to return (default: 10)
-   * @param minSimilarity - Minimum similarity threshold (default: 0, range: -1 to 1)
+   * @param minSimilarity - Minimum similarity threshold (default: 0.5, range: 0 to 1)
    * @returns Array of search results sorted by similarity (highest first)
    */
   async search(
@@ -145,21 +189,30 @@ export class EmbeddingEngine {
       'minSimilarity must be between 0 and 1.'
     )
 
-    if (!existsSync(this.storePath)) {
+    const storage = await this.ensureStorageEngine()
+
+    if (storage.count() === 0) {
       return []
     }
 
     const queryEmbedding = await this.generateEmbedding(query)
     const candidateSet = new CandidateSet(limit)
 
-    for await (const entry of this.fileReader.entries()) {
-      const similarity = this.cosineSimilarity(queryEmbedding, entry.embedding)
+    // Iterate through all entries in the index
+    for (const [key, location] of storage.locations()) {
+      // Read embedding directly from data file
+      const embedding = await storage.readEmbeddingAt(location.offset)
+      if (!embedding) {
+        continue
+      }
+
+      const similarity = this.cosineSimilarityFloat32(queryEmbedding, embedding)
 
       if (similarity < minSimilarity) {
         continue
       }
 
-      candidateSet.add(entry.key, similarity)
+      candidateSet.add(key, similarity)
     }
 
     const results: SearchResult[] = candidateSet.getEntries().map((entry) => ({
@@ -171,31 +224,28 @@ export class EmbeddingEngine {
   }
 
   /**
-   * Stores a text embedding in the binary append-only file
-   * Creates header on first write
+   * Stores a text embedding with WAL-based durability
    * @param key - Unique identifier for this entry
    * @param text - Text to embed and store
    */
   async store(key: string, text: string): Promise<void> {
+    invariant(key, 'Key must be provided.')
+    invariant(text, 'Text must be provided.')
+
     const embedding = await this.generateEmbedding(text)
     const embeddingFloat32 = new Float32Array(embedding)
 
-    const dir = dirname(this.storePath)
-    await mkdir(dir, { recursive: true })
+    const storage = await this.ensureStorageEngine()
 
-    // Write header if file doesn't exist
-    if (!existsSync(this.storePath)) {
-      await writeHeader(this.storePath, embedding.length)
-    }
-
-    // Append record
-    await writeRecord(this.storePath, key, embeddingFloat32)
+    // Determine if this is an insert or update
+    const op = storage.hasKey(key) ? opType.update : opType.insert
+    await storage.writeRecord(key, embeddingFloat32, op)
   }
 
   /**
    * Stores multiple text embeddings in batch
    * More efficient than calling store() multiple times
-   * Generates embeddings in parallel and writes all records at once
+   * Generates embeddings in parallel and writes records sequentially
    * @param items - Array of {key, text} objects to store
    */
   async storeMany(items: Array<{ key: string; text: string }>): Promise<void> {
@@ -214,30 +264,52 @@ export class EmbeddingEngine {
 
     const embeddingsList = await Promise.all(embeddingPromises)
 
-    const dir = dirname(this.storePath)
-    await mkdir(dir, { recursive: true })
+    const storage = await this.ensureStorageEngine()
 
-    // Write header if file doesn't exist
-    if (!existsSync(this.storePath)) {
-      await writeHeader(this.storePath, embeddingsList[0].length)
+    // Write records sequentially (storage engine handles locking)
+    for (let i = 0; i < items.length; i++) {
+      const key = items[i].key
+      const embedding = new Float32Array(embeddingsList[i])
+      const op = storage.hasKey(key) ? opType.update : opType.insert
+      await storage.writeRecord(key, embedding, op)
     }
-
-    // Prepare records for batch write
-    const records = items.map((item, index) => ({
-      key: item.key,
-      embedding: new Float32Array(embeddingsList[index])
-    }))
-
-    await writeRecords(this.storePath, records)
   }
 
   /**
-   * Calculates cosine similarity between two embeddings
-   * @param a - First embedding vector
-   * @param b - Second embedding vector
-   * @returns Cosine similarity score between -1 and 1 (1 = identical, -1 = opposite)
+   * Deletes an entry by key
+   * Logical delete - records a delete marker in the WAL
+   * @param key - Unique identifier for the entry to delete
+   * @returns true if the entry was deleted, false if it didn't exist
    */
-  private cosineSimilarity(a: number[], b: number[]): number {
+  async delete(key: string): Promise<boolean> {
+    invariant(key, 'Key must be provided.')
+
+    const storage = await this.ensureStorageEngine()
+    return storage.deleteRecord(key)
+  }
+
+  /**
+   * Gets all keys in the database
+   * @returns Iterator of all keys
+   */
+  async keys(): Promise<string[]> {
+    const storage = await this.ensureStorageEngine()
+    return Array.from(storage.keys())
+  }
+
+  /**
+   * Gets the number of entries in the database
+   * @returns Number of entries
+   */
+  async count(): Promise<number> {
+    const storage = await this.ensureStorageEngine()
+    return storage.count()
+  }
+
+  /**
+   * Calculates cosine similarity between number[] and Float32Array
+   */
+  private cosineSimilarityFloat32(a: number[], b: Float32Array): number {
     if (a.length !== b.length) {
       throw new Error('Embeddings must have the same dimensions')
     }
@@ -263,10 +335,18 @@ export class EmbeddingEngine {
   }
 
   /**
-   * Disposes of the cached embedding model and releases resources
+   * Disposes of resources and closes the storage engine
    * Call this when you're done using the engine to free up memory
    */
   async dispose(): Promise<void> {
+    // Close storage engine
+    if (this.storageEngine) {
+      await this.storageEngine.close()
+      this.storageEngine = null
+    }
+    this.storageInitPromise = undefined
+
+    // Dispose embedding model
     if (this.embeddingContext) {
       await this.embeddingContext.dispose()
       this.embeddingContext = undefined
