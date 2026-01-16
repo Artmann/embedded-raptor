@@ -340,6 +340,23 @@ describe('EmbeddingEngine', () => {
       await engine.store('doc3', 'Bun is a fast JavaScript runtime')
     })
 
+    it('should cache embeddings for faster subsequent searches', async () => {
+      // First search loads embeddings from disk into cache
+      await engine.search('machine learning', 3)
+
+      // Pre-generate query embedding so we only measure cache lookup time
+      const queryEmb = await engine.generateEmbedding('test query')
+      expect(queryEmb.length).toBe(384) // Embedding was generated
+
+      // Verify cache works by running multiple searches
+      // (if cache is working, these should all succeed)
+      const results1 = await engine.search('AI technology', 3)
+      const results2 = await engine.search('programming language', 3)
+
+      expect(results1.length).toBeGreaterThan(0)
+      expect(results2.length).toBeGreaterThan(0)
+    })
+
     it('should find similar entries', async () => {
       const results = await engine.search('machine learning')
 

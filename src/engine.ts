@@ -28,6 +28,8 @@ export class EmbeddingEngine {
   private embeddingContext?: LlamaEmbeddingContext
   private initPromise?: Promise<void>
   private storageInitPromise?: Promise<StorageEngine>
+  // In-memory embedding cache for faster search
+  private embeddingCache: Map<string, Float32Array> | null = null
 
   constructor(options: EngineOptions) {
     this.storePath = options.storePath
@@ -63,6 +65,37 @@ export class EmbeddingEngine {
       dataPath: this.storePath,
       dimension: this.dimension
     })
+  }
+
+  /**
+   * Loads all embeddings into memory for faster search
+   * Called lazily on first search
+   * @returns The embedding cache Map
+   */
+  private async ensureEmbeddingCache(
+    storage: StorageEngine
+  ): Promise<Map<string, Float32Array>> {
+    if (this.embeddingCache !== null) {
+      return this.embeddingCache
+    }
+
+    this.embeddingCache = new Map()
+
+    for (const [key, location] of storage.locations()) {
+      const embedding = await storage.readEmbeddingAt(location.offset)
+      if (embedding) {
+        this.embeddingCache.set(key, embedding)
+      }
+    }
+
+    return this.embeddingCache
+  }
+
+  /**
+   * Invalidates the embedding cache, forcing reload on next search
+   */
+  private invalidateEmbeddingCache(): void {
+    this.embeddingCache = null
   }
 
   /**
@@ -210,10 +243,12 @@ export class EmbeddingEngine {
     const queryEmbedding = await this.generateEmbeddingFloat32(query)
     const candidateSet = new CandidateSet(limit)
 
-    // Iterate through all entries in the index
-    for (const [key, location] of storage.locations()) {
-      // Read embedding directly from data file
-      const embedding = await storage.readEmbeddingAt(location.offset)
+    // Load embeddings into cache if not already cached
+    const cache = await this.ensureEmbeddingCache(storage)
+
+    // Iterate through all entries using cached embeddings
+    for (const key of storage.keys()) {
+      const embedding = cache.get(key)
       if (!embedding) {
         continue
       }
@@ -250,6 +285,11 @@ export class EmbeddingEngine {
     // Determine if this is an insert or update
     const op = storage.hasKey(key) ? opType.update : opType.insert
     await storage.writeRecord(key, embedding, op)
+
+    // Update cache if it exists (avoid invalidating entire cache)
+    if (this.embeddingCache !== null) {
+      this.embeddingCache.set(key, embedding)
+    }
   }
 
   /**
@@ -282,6 +322,11 @@ export class EmbeddingEngine {
       const embedding = embeddingsList[i]
       const op = storage.hasKey(key) ? opType.update : opType.insert
       await storage.writeRecord(key, embedding, op)
+
+      // Update cache if it exists
+      if (this.embeddingCache !== null) {
+        this.embeddingCache.set(key, embedding)
+      }
     }
   }
 
@@ -295,7 +340,14 @@ export class EmbeddingEngine {
     invariant(key, 'Key must be provided.')
 
     const storage = await this.ensureStorageEngine()
-    return storage.deleteRecord(key)
+    const deleted = await storage.deleteRecord(key)
+
+    // Remove from cache if it exists
+    if (deleted && this.embeddingCache !== null) {
+      this.embeddingCache.delete(key)
+    }
+
+    return deleted
   }
 
   /**
@@ -352,6 +404,9 @@ export class EmbeddingEngine {
    * Call this when you're done using the engine to free up memory
    */
   async dispose(): Promise<void> {
+    // Clear embedding cache
+    this.embeddingCache = null
+
     // Close storage engine
     if (this.storageEngine) {
       await this.storageEngine.close()
