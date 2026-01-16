@@ -5,10 +5,16 @@ import { sharedFlags } from './flags'
 export const deleteCmd = command(
   {
     name: 'delete',
-    description: 'Delete an embedding entry by key',
     parameters: ['<key>'],
     flags: {
       ...sharedFlags
+    },
+    help: {
+      description: 'Delete an embedding entry by key',
+      examples: [
+        'raptor delete doc1',
+        'raptor delete -s ./my-db.raptor mykey'
+      ]
     }
   },
   async (argv) => {

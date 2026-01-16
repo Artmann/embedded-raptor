@@ -21,7 +21,12 @@
       "Bash(raptor:*)",
       "Bash(echo:*)",
       "Bash(npm view:*)",
-      "Bash(node dist/cli.mjs:*)"
+      "Bash(node dist/cli.mjs:*)",
+      "mcp__package-registry__get-npm-package-details",
+      "WebFetch(domain:www.npmjs.com)",
+      "mcp__github__search_repositories",
+      "mcp__deepwiki__read_wiki_structure",
+      "mcp__github__get_file_contents"
     ]
   }
 }

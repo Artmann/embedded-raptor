@@ -5,10 +5,16 @@ import { sharedFlags } from './flags'
 export const store = command(
   {
     name: 'store',
-    description: 'Store a text embedding with a key',
     parameters: ['<key>', '<text>'],
     flags: {
       ...sharedFlags
+    },
+    help: {
+      description: 'Store a text embedding with a key',
+      examples: [
+        'raptor store doc1 "Machine learning is awesome"',
+        'raptor store -s ./my-db.raptor mykey "Some text to embed"'
+      ]
     }
   },
   async (argv) => {

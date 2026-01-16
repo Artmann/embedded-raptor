@@ -5,10 +5,16 @@ import { sharedFlags } from './flags'
 export const get = command(
   {
     name: 'get',
-    description: 'Retrieve an embedding entry by key',
     parameters: ['<key>'],
     flags: {
       ...sharedFlags
+    },
+    help: {
+      description: 'Retrieve an embedding entry by key',
+      examples: [
+        'raptor get doc1',
+        'raptor get -s ./my-db.raptor mykey'
+      ]
     }
   },
   async (argv) => {

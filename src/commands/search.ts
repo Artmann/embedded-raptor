@@ -5,11 +5,18 @@ import { sharedFlags, searchFlags } from './flags'
 export const search = command(
   {
     name: 'search',
-    description: 'Search for similar embeddings using a query',
     parameters: ['<query>'],
     flags: {
       ...sharedFlags,
       ...searchFlags
+    },
+    help: {
+      description: 'Search for similar embeddings using a query',
+      examples: [
+        'raptor search "artificial intelligence"',
+        'raptor search -l 5 -m 0.7 "machine learning"',
+        'raptor search -s ./my-db.raptor "find similar docs"'
+      ]
     }
   },
   async (argv) => {

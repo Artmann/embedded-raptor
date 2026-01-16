@@ -18,9 +18,15 @@ function formatKeyHash(hash: Uint8Array): string {
 export const walCmd = command(
   {
     name: 'wal',
-    description: 'Display WAL entries in human-readable format',
     flags: {
       ...sharedFlags
+    },
+    help: {
+      description: 'Display WAL entries in human-readable format',
+      examples: [
+        'raptor wal',
+        'raptor wal -s ./my-db.raptor'
+      ]
     }
   },
   async (argv) => {
