@@ -30,6 +30,8 @@ export async function benchmarkStore(
 
   const endTime = performance.now()
 
+  await engine.dispose()
+
   const totalDurationMs = endTime - startTime
   const avgDurationPerDocMs =
     articles.length > 0 ? totalDurationMs / articles.length : 0

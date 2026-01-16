@@ -35,6 +35,8 @@ export async function benchmarkSearch(
   const avgWarmMs =
     queries.length > 1 ? totalWarmDuration / (queries.length - 1) : 0
 
+  await engine.dispose()
+
   return {
     datasetSize,
     numQueries: queries.length,
