@@ -52,7 +52,8 @@ export class WriteBatcher {
     this.index = index
     this.dimension = dimension
     this.maxBatchSize = options?.maxBatchSize ?? DEFAULT_MAX_BATCH_SIZE
-    this.maxBatchDelayMs = options?.maxBatchDelayMs ?? DEFAULT_MAX_BATCH_DELAY_MS
+    this.maxBatchDelayMs =
+      options?.maxBatchDelayMs ?? DEFAULT_MAX_BATCH_DELAY_MS
     this.maxBatchBytes = options?.maxBatchBytes ?? DEFAULT_MAX_BATCH_BYTES
   }
 

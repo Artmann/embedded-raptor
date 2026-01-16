@@ -23,10 +23,7 @@ export type {
   WriteBatcherOptions
 } from './types'
 
-export type {
-  PendingWrite,
-  FlushResult
-} from './write-batch'
+export type { PendingWrite, FlushResult } from './write-batch'
 
 // Constants
 export {
