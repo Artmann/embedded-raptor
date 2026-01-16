@@ -25,11 +25,13 @@ import { Wal } from './wal'
 import { KeyIndex } from './key-index'
 import { FileLock } from './file-lock'
 import { Mutex } from './mutex'
+import { WriteBatcher } from './write-batcher'
 import type {
   DataRecord,
   RecordLocation,
   StorageEngineOptions,
-  OpType
+  OpType,
+  WriteBatcherOptions
 } from './types'
 
 export class StorageEngine {
@@ -42,6 +44,7 @@ export class StorageEngine {
   private readonly index: KeyIndex
   private readonly fileLock: FileLock
   private readonly writeMutex: Mutex
+  private readonly writeBatcher: WriteBatcher | null
 
   private dataHandle: FileHandle | null = null
   private sequenceCounter: bigint = 0n
@@ -54,7 +57,8 @@ export class StorageEngine {
     wal: Wal,
     index: KeyIndex,
     fileLock: FileLock,
-    sequenceCounter: bigint
+    sequenceCounter: bigint,
+    writeBatcher: WriteBatcher | null
   ) {
     this.dataPath = dataPath
     this.walPath = walPath
@@ -65,6 +69,7 @@ export class StorageEngine {
     this.fileLock = fileLock
     this.writeMutex = new Mutex()
     this.sequenceCounter = sequenceCounter
+    this.writeBatcher = writeBatcher
   }
 
   /**
@@ -101,6 +106,19 @@ export class StorageEngine {
       // Build index from WAL (handles fresh database case)
       const { index, maxSequence } = await KeyIndex.buildFromWal(wal, dataPath)
 
+      // Create write batcher if enabled (default: true)
+      let writeBatcher: WriteBatcher | null = null
+      if (options.batchingEnabled !== false) {
+        writeBatcher = new WriteBatcher(
+          dataPath,
+          wal,
+          index,
+          dimension,
+          options.batchOptions
+        )
+        await writeBatcher.initialize()
+      }
+
       return new StorageEngine(
         dataPath,
         walPath,
@@ -109,7 +127,8 @@ export class StorageEngine {
         wal,
         index,
         fileLock,
-        maxSequence + 1n
+        maxSequence + 1n,
+        writeBatcher
       )
     } catch (error) {
       await fileLock.release()
@@ -156,6 +175,74 @@ export class StorageEngine {
       )
     }
 
+    if (this.writeBatcher) {
+      return this.writeRecordBatched(key, embedding, op)
+    }
+
+    return this.writeRecordImmediate(key, embedding, op)
+  }
+
+  /**
+   * Write a record using the batcher for improved throughput.
+   */
+  private async writeRecordBatched(
+    key: string,
+    embedding: Float32Array,
+    op: OpType
+  ): Promise<void> {
+    await this.writeMutex.acquire()
+
+    let sequenceNumber: bigint
+    let recordData: Uint8Array
+    let offset: number
+
+    try {
+      sequenceNumber = this.sequenceCounter++
+
+      // 1. Serialize data record
+      const record: DataRecord = {
+        opType: op,
+        sequenceNumber,
+        key,
+        dimension: this.dimension,
+        embedding
+      }
+      recordData = serializeDataRecord(record)
+
+      // 2. Calculate offset (batcher tracks cumulative file size)
+      offset = this.writeBatcher!.calculateNextOffset(recordData.length)
+    } finally {
+      this.writeMutex.release()
+    }
+
+    // 3. Queue write and wait for flush
+    return new Promise<void>((resolve, reject) => {
+      this.writeBatcher!.queueWrite({
+        dataRecord: recordData,
+        walEntry: {
+          opType: op,
+          sequenceNumber,
+          offset,
+          length: recordData.length,
+          keyHash: hashKey(key)
+        },
+        key,
+        op,
+        resolve,
+        reject
+      })
+    })
+  }
+
+  /**
+   * Write a record immediately (non-batched).
+   * Implements: data → fsync → WAL → fsync → index
+   */
+  private async writeRecordImmediate(
+    key: string,
+    embedding: Float32Array,
+    op: OpType
+  ): Promise<void> {
     await this.writeMutex.acquire()
 
     try {
@@ -220,41 +307,9 @@ export class StorageEngine {
       return false
     }
 
-    await this.writeMutex.acquire()
-
-    try {
-      const sequenceNumber = this.sequenceCounter++
-
-      // For delete, we still write a data record (with empty embedding)
-      // This ensures the delete can be recovered from WAL
-      const record: DataRecord = {
-        opType: opType.delete,
-        sequenceNumber,
-        key,
-        dimension: this.dimension,
-        embedding: new Float32Array(this.dimension)
-      }
-      const recordData = serializeDataRecord(record)
-
-      // Write to data file
-      const offset = await this.appendToDataFile(recordData)
-
-      // Write WAL entry (COMMIT POINT)
-      await this.wal.append({
-        opType: opType.delete,
-        sequenceNumber,
-        offset,
-        length: recordData.length,
-        keyHash: hashKey(key)
-      })
-
-      // Update index
-      this.index.delete(key)
-
-      return true
-    } finally {
-      this.writeMutex.release()
-    }
+    // Use the same write path as regular writes (supports batching)
+    await this.writeRecord(key, new Float32Array(this.dimension), opType.delete)
+    return true
   }
 
   /**
@@ -321,9 +376,24 @@ export class StorageEngine {
   }
 
   /**
+   * Force flush all pending writes to disk.
+   * Only needed when using batching and you need explicit durability.
+   */
+  async flush(): Promise<void> {
+    if (this.writeBatcher) {
+      await this.writeBatcher.forceFlush()
+    }
+  }
+
+  /**
    * Close the storage engine.
    */
   async close(): Promise<void> {
+    // Flush and close the batcher first
+    if (this.writeBatcher) {
+      await this.writeBatcher.close()
+    }
+
     if (this.dataHandle) {
       await this.dataHandle.close()
       this.dataHandle = null

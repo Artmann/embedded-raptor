@@ -57,6 +57,18 @@ export interface DataRecord {
 }
 
 /**
+ * Options for configuring write batching.
+ */
+export interface WriteBatcherOptions {
+  /** Maximum number of writes to batch before flushing (default: 100) */
+  maxBatchSize?: number
+  /** Maximum time in ms to wait before flushing (default: 10) */
+  maxBatchDelayMs?: number
+  /** Maximum total bytes in data file writes before flushing (default: 1MB) */
+  maxBatchBytes?: number
+}
+
+/**
  * Options for creating a storage engine.
  */
 export interface StorageEngineOptions {
@@ -66,6 +78,10 @@ export interface StorageEngineOptions {
   dimension?: number
   /** Lock acquisition timeout in milliseconds (default: 10000). Use 0 to fail immediately. */
   lockTimeout?: number
+  /** Enable write batching for improved throughput (default: true) */
+  batchingEnabled?: boolean
+  /** Options for write batching */
+  batchOptions?: WriteBatcherOptions
 }
 
 /**

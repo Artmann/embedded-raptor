@@ -316,16 +316,24 @@ export class EmbeddingEngine {
 
     const storage = await this.ensureStorageEngine()
 
-    // Write records sequentially (storage engine handles locking)
-    for (let i = 0; i < items.length; i++) {
-      const key = items[i].key
-      const embedding = embeddingsList[i]
-      const op = storage.hasKey(key) ? opType.update : opType.insert
-      await storage.writeRecord(key, embedding, op)
+    // Determine operation types before concurrent writes
+    const operations = items.map((item) => ({
+      key: item.key,
+      op: storage.hasKey(item.key) ? opType.update : opType.insert
+    }))
 
-      // Update cache if it exists
-      if (this.embeddingCache !== null) {
-        this.embeddingCache.set(key, embedding)
+    // Write records concurrently (batching will group fsyncs)
+    const writePromises = items.map((item, i) => {
+      const embedding = embeddingsList[i]
+      return storage.writeRecord(item.key, embedding, operations[i].op)
+    })
+
+    await Promise.all(writePromises)
+
+    // Update cache after all writes complete
+    if (this.embeddingCache !== null) {
+      for (let i = 0; i < items.length; i++) {
+        this.embeddingCache.set(items[i].key, embeddingsList[i])
       }
     }
   }
