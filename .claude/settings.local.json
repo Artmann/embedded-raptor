@@ -11,7 +11,12 @@
       "Bash(bun run benchmark:quick)",
       "Bash(bun run lint:*)",
       "Bash(bun:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "WebSearch",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: Add wal command to display WAL entries\n\nAdds a new CLI command `raptor wal` that displays WAL entries in a\nhuman-readable format showing sequence number, operation type \\(INSERT,\nUPDATE, DELETE\\), data file offset/length, and key hash.\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nperf: Use binary heap in CandidateSet for O\\(log n\\) insertion\n\nConvert CandidateSet from O\\(n\\) linear scan to O\\(log n\\) min-heap\nfor finding and replacing the minimum value when at capacity.\n\n- Add bubbleUp/bubbleDown methods for heap maintenance\n- Root of min-heap always contains smallest value for O\\(1\\) access\n- getEntries still sorts for final output \\(unchanged behavior\\)\nEOF\n\\)\")",
+      "Bash(git commit:*)"
     ]
   }
 }
