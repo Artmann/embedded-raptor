@@ -247,16 +247,14 @@ export class WriteBatcher {
     }
 
     // Use promise-based lock to prevent race conditions in concurrent access
-    if (!this.dataHandlePromise) {
-      this.dataHandlePromise = (async () => {
-        await mkdir(dirname(this.dataPath), { recursive: true })
-        const handle = await open(this.dataPath, 'r+').catch(async () => {
-          return open(this.dataPath, 'w+')
-        })
-        this.dataHandle = handle
-        return handle
-      })()
-    }
+    this.dataHandlePromise ??= (async () => {
+      await mkdir(dirname(this.dataPath), { recursive: true })
+      const handle = await open(this.dataPath, 'r+').catch(async () => {
+        return open(this.dataPath, 'w+')
+      })
+      this.dataHandle = handle
+      return handle
+    })()
 
     return this.dataHandlePromise
   }

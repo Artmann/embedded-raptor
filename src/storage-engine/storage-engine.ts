@@ -458,18 +458,16 @@ export class StorageEngine {
     }
 
     // Use promise-based lock to ensure only one open operation runs
-    if (!this.dataHandlePromise) {
-      this.dataHandlePromise = (async () => {
-        // Ensure directory exists
-        await mkdir(dirname(this.dataPath), { recursive: true })
-        const handle = await open(this.dataPath, 'r+').catch(async () => {
-          // File doesn't exist, create it
-          return open(this.dataPath, 'w+')
-        })
-        this.dataHandle = handle
-        return handle
-      })()
-    }
+    this.dataHandlePromise ??= (async () => {
+      // Ensure directory exists
+      await mkdir(dirname(this.dataPath), { recursive: true })
+      const handle = await open(this.dataPath, 'r+').catch(async () => {
+        // File doesn't exist, create it
+        return open(this.dataPath, 'w+')
+      })
+      this.dataHandle = handle
+      return handle
+    })()
 
     return this.dataHandlePromise
   }
