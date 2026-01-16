@@ -313,6 +313,23 @@ describe('EmbeddingEngine', () => {
     })
   })
 
+  describe('generateEmbedding', () => {
+    it('should return a number[] of 384 dimensions', async () => {
+      const embedding = await engine.generateEmbedding('test text')
+
+      expect(embedding).toBeInstanceOf(Array)
+      expect(embedding.length).toBe(384)
+      expect(typeof embedding[0]).toBe('number')
+    })
+
+    it('should return consistent embeddings for the same text', async () => {
+      const embedding1 = await engine.generateEmbedding('test text')
+      const embedding2 = await engine.generateEmbedding('test text')
+
+      expect(embedding1).toEqual(embedding2)
+    })
+  })
+
   describe('search', () => {
     beforeEach(async () => {
       await engine.store('doc1', 'The quick brown fox jumps over the lazy dog')

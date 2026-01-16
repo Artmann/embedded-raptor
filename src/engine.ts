@@ -127,13 +127,22 @@ export class EmbeddingEngine {
    * @returns 384-dimensional embedding vector (normalized)
    */
   async generateEmbedding(text: string): Promise<number[]> {
+    const embedding = await this.generateEmbeddingFloat32(text)
+    return Array.from(embedding)
+  }
+
+  /**
+   * Internal method that returns embedding as Float32Array for performance
+   * Uses Float32Array throughout internal operations to avoid boxing overhead
+   */
+  private async generateEmbeddingFloat32(text: string): Promise<Float32Array> {
     await this.ensureModelLoaded()
     invariant(this.embeddingContext, 'Embedding context not initialized')
 
     const truncatedText = this.truncateToContextSize(text)
     const embedding = await this.embeddingContext.getEmbeddingFor(truncatedText)
 
-    return Array.from(embedding.vector)
+    return new Float32Array(embedding.vector)
   }
 
   /**
@@ -198,7 +207,7 @@ export class EmbeddingEngine {
       return []
     }
 
-    const queryEmbedding = await this.generateEmbedding(query)
+    const queryEmbedding = await this.generateEmbeddingFloat32(query)
     const candidateSet = new CandidateSet(limit)
 
     // Iterate through all entries in the index
@@ -209,7 +218,7 @@ export class EmbeddingEngine {
         continue
       }
 
-      const similarity = this.cosineSimilarityFloat32(queryEmbedding, embedding)
+      const similarity = this.cosineSimilarity(queryEmbedding, embedding)
 
       if (similarity < minSimilarity) {
         continue
@@ -235,14 +244,12 @@ export class EmbeddingEngine {
     invariant(key, 'Key must be provided.')
     invariant(text, 'Text must be provided.')
 
-    const embedding = await this.generateEmbedding(text)
-    const embeddingFloat32 = new Float32Array(embedding)
-
+    const embedding = await this.generateEmbeddingFloat32(text)
     const storage = await this.ensureStorageEngine()
 
     // Determine if this is an insert or update
     const op = storage.hasKey(key) ? opType.update : opType.insert
-    await storage.writeRecord(key, embeddingFloat32, op)
+    await storage.writeRecord(key, embedding, op)
   }
 
   /**
@@ -258,11 +265,11 @@ export class EmbeddingEngine {
     const embeddingContext = this.embeddingContext
     invariant(embeddingContext, 'Embedding context not initialized')
 
-    // Generate embeddings in parallel
+    // Generate embeddings in parallel (returns Float32Array directly)
     const embeddingPromises = items.map(async (item) => {
       const truncatedText = this.truncateToContextSize(item.text)
       const embedding = await embeddingContext.getEmbeddingFor(truncatedText)
-      return Array.from(embedding.vector)
+      return new Float32Array(embedding.vector)
     })
 
     const embeddingsList = await Promise.all(embeddingPromises)
@@ -272,7 +279,7 @@ export class EmbeddingEngine {
     // Write records sequentially (storage engine handles locking)
     for (let i = 0; i < items.length; i++) {
       const key = items[i].key
-      const embedding = new Float32Array(embeddingsList[i])
+      const embedding = embeddingsList[i]
       const op = storage.hasKey(key) ? opType.update : opType.insert
       await storage.writeRecord(key, embedding, op)
     }
@@ -310,9 +317,10 @@ export class EmbeddingEngine {
   }
 
   /**
-   * Calculates cosine similarity between number[] and Float32Array
+   * Calculates cosine similarity between two Float32Arrays
+   * Uses typed arrays throughout to avoid boxing overhead
    */
-  private cosineSimilarityFloat32(a: number[], b: Float32Array): number {
+  private cosineSimilarity(a: Float32Array, b: Float32Array): number {
     if (a.length !== b.length) {
       throw new Error('Embeddings must have the same dimensions')
     }
@@ -322,9 +330,11 @@ export class EmbeddingEngine {
     let magnitudeB = 0
 
     for (let i = 0; i < a.length; i++) {
-      dotProduct += a[i] * b[i]
-      magnitudeA += a[i] * a[i]
-      magnitudeB += b[i] * b[i]
+      const ai = a[i]
+      const bi = b[i]
+      dotProduct += ai * bi
+      magnitudeA += ai * ai
+      magnitudeB += bi * bi
     }
 
     magnitudeA = Math.sqrt(magnitudeA)
