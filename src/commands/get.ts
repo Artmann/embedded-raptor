@@ -11,10 +11,7 @@ export const get = command(
     },
     help: {
       description: 'Retrieve an embedding entry by key',
-      examples: [
-        'raptor get doc1',
-        'raptor get -s ./my-db.raptor mykey'
-      ]
+      examples: ['raptor get doc1', 'raptor get -s ./my-db.raptor mykey']
     }
   },
   async (argv) => {

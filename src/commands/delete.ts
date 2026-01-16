@@ -11,10 +11,7 @@ export const deleteCmd = command(
     },
     help: {
       description: 'Delete an embedding entry by key',
-      examples: [
-        'raptor delete doc1',
-        'raptor delete -s ./my-db.raptor mykey'
-      ]
+      examples: ['raptor delete doc1', 'raptor delete -s ./my-db.raptor mykey']
     }
   },
   async (argv) => {
