@@ -96,6 +96,7 @@ describe('StorageEngine recovery', () => {
       const orphanData = serializeDataRecord({
         opType: opType.insert,
         sequenceNumber: 999n,
+        timestamp: BigInt(Date.now()),
         key: 'orphan',
         dimension: 384,
         embedding: generateRandomEmbedding(384)

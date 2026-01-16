@@ -198,11 +198,13 @@ export class StorageEngine {
 
     try {
       sequenceNumber = this.sequenceCounter++
+      const timestamp = BigInt(Date.now())
 
       // 1. Serialize data record
       const record: DataRecord = {
         opType: op,
         sequenceNumber,
+        timestamp,
         key,
         dimension: this.dimension,
         embedding
@@ -247,11 +249,13 @@ export class StorageEngine {
 
     try {
       const sequenceNumber = this.sequenceCounter++
+      const timestamp = BigInt(Date.now())
 
       // 1. Serialize data record
       const record: DataRecord = {
         opType: op,
         sequenceNumber,
+        timestamp,
         key,
         dimension: this.dimension,
         embedding
@@ -347,15 +351,15 @@ export class StorageEngine {
     const dataHandle = await this.getDataHandle()
 
     // Calculate where embedding starts in record
-    // magic(4) + version(2) + opType(1) + flags(1) + seqNum(8) + keyLen(2) = 18
+    // magic(4) + version(2) + opType(1) + flags(1) + seqNum(8) + timestamp(8) + keyLen(2) = 26
     // Then key (variable), then dimension(4), then embedding
     // We need to read keyLen first to know the offset
 
-    const headerBuffer = new Uint8Array(20) // Read up to keyLen + 2 bytes
-    await dataHandle.read(headerBuffer, 0, 20, offset)
+    const headerBuffer = new Uint8Array(28) // Read up to keyLen + 2 bytes
+    await dataHandle.read(headerBuffer, 0, 28, offset)
 
-    const keyLen = new DataView(headerBuffer.buffer).getUint16(16, true)
-    const embeddingOffset = offset + 18 + keyLen + 4
+    const keyLen = new DataView(headerBuffer.buffer).getUint16(24, true)
+    const embeddingOffset = offset + 26 + keyLen + 4
 
     const embeddingBuffer = new Uint8Array(this.dimension * 4)
     await dataHandle.read(

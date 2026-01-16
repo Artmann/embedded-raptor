@@ -48,6 +48,8 @@ export interface DataRecord {
   opType: OpType
   /** Monotonic sequence number */
   sequenceNumber: bigint
+  /** Unix timestamp in milliseconds when record was created */
+  timestamp: bigint
   /** Record key */
   key: string
   /** Embedding dimension */

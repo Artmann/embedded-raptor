@@ -198,7 +198,7 @@ export class EmbeddingEngine {
       key: record.key,
       text: '', // Text is not stored in v2 format
       embedding: Array.from(record.embedding),
-      timestamp: Number(record.sequenceNumber)
+      timestamp: Number(record.timestamp)
     }
   }
 
