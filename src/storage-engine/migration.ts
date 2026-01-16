@@ -31,7 +31,8 @@ export async function detectVersion(filePath: string): Promise<number | null> {
       await fileHandle.read(buffer, 0, headerSize, 0)
 
       const view = new DataView(buffer.buffer)
-      const magic = view.getUint32(0, true)
+      // Magic is ASCII "EMBD" - read as big-endian for correct byte order
+      const magic = view.getUint32(0, false)
 
       if (magic !== headerMagic) {
         return null

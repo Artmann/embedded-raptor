@@ -246,8 +246,8 @@ export function serializeHeader(dimension: number): Uint8Array {
   const buffer = new Uint8Array(headerSize)
   const view = new DataView(buffer.buffer)
 
-  // Magic (4 bytes)
-  view.setUint32(headerOffsets.magic, headerMagic, true)
+  // Magic (4 bytes) - ASCII "EMBD", use big-endian for correct byte order
+  view.setUint32(headerOffsets.magic, headerMagic, false)
 
   // Version (2 bytes)
   view.setUint16(headerOffsets.version, headerVersionV2, true)
@@ -270,8 +270,8 @@ export function deserializeHeader(data: Uint8Array): DataFileHeader | null {
 
   const view = new DataView(data.buffer, data.byteOffset)
 
-  // Validate magic
-  const magic = view.getUint32(headerOffsets.magic, true)
+  // Validate magic - ASCII "EMBD", use big-endian for correct byte order
+  const magic = view.getUint32(headerOffsets.magic, false)
   if (magic !== headerMagic) {
     return null
   }

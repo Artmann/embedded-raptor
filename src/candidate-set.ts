@@ -16,7 +16,7 @@ export class CandidateSet {
 
   add(key: string, value: number): void {
     invariant(key, 'Key must be provided.')
-    invariant(value, 'Value must be provided.')
+    invariant(value !== undefined && value !== null, 'Value must be provided.')
 
     if (this.heap.length < this.size) {
       // Under capacity: push and bubble up

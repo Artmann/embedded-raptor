@@ -95,9 +95,17 @@ describe('CandidateSet', () => {
 
     it('should throw error for invalid parameters', () => {
       expect(() => candidateSet.add('', 0.5)).toThrow('Key must be provided.')
-      expect(() => candidateSet.add('key', 0)).toThrow(
-        'Value must be provided.'
-      )
+    })
+
+    it('should accept zero as a valid value', () => {
+      candidateSet.add('zero-similarity', 0)
+
+      expect(candidateSet.count()).toBe(1)
+
+      const entries = candidateSet.getEntries()
+
+      expect(entries[0].key).toBe('zero-similarity')
+      expect(entries[0].value).toBe(0)
     })
   })
 
