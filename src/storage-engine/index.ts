@@ -8,6 +8,7 @@ export { Wal } from './wal'
 export { KeyIndex } from './key-index'
 export { FileLock, DatabaseLockedError } from './file-lock'
 export { Mutex } from './mutex'
+export { WriteBatcher } from './write-batcher'
 
 // Types
 export type {
@@ -18,8 +19,14 @@ export type {
   StorageEngineOptions,
   DeserializeDataResult,
   DeserializeWalResult,
-  DataFileHeader
+  DataFileHeader,
+  WriteBatcherOptions
 } from './types'
+
+export type {
+  PendingWrite,
+  FlushResult
+} from './write-batch'
 
 // Constants
 export {

@@ -40,6 +40,38 @@ export class Wal {
   }
 
   /**
+   * Append multiple WAL entries and sync once.
+   * This is more efficient than calling append() multiple times.
+   * @returns The number of entries written
+   */
+  async appendBatch(entries: WalEntry[]): Promise<number> {
+    if (entries.length === 0) {
+      return 0
+    }
+
+    // Ensure directory exists
+    await mkdir(dirname(this.filePath), { recursive: true })
+
+    // Open file for appending if not already open
+    this.fileHandle ??= await open(this.filePath, 'a')
+
+    // Serialize all entries into a single buffer
+    const totalSize = entries.length * walEntrySize
+    const buffer = new Uint8Array(totalSize)
+
+    for (let i = 0; i < entries.length; i++) {
+      const entryBuffer = serializeWalEntry(entries[i])
+      buffer.set(entryBuffer, i * walEntrySize)
+    }
+
+    // Single write + single sync
+    await this.fileHandle.write(buffer)
+    await this.fileHandle.sync()
+
+    return entries.length
+  }
+
+  /**
    * Recover WAL entries from disk.
    * Yields valid entries in order, stopping at the first corrupted entry.
    */
