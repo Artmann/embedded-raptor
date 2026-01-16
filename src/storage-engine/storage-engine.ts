@@ -46,6 +46,7 @@ export class StorageEngine {
   private readonly writeBatcher: WriteBatcher | null
 
   private dataHandle: FileHandle | null = null
+  private dataHandlePromise: Promise<FileHandle> | null = null
   private sequenceCounter: bigint = 0n
 
   private constructor(
@@ -449,16 +450,27 @@ export class StorageEngine {
 
   /**
    * Get or open the data file handle.
+   * Uses promise-based locking to prevent race conditions in concurrent access.
    */
   private async getDataHandle(): Promise<FileHandle> {
-    if (!this.dataHandle) {
-      // Ensure directory exists
-      await mkdir(dirname(this.dataPath), { recursive: true })
-      this.dataHandle = await open(this.dataPath, 'r+').catch(async () => {
-        // File doesn't exist, create it
-        return open(this.dataPath, 'w+')
-      })
+    if (this.dataHandle) {
+      return this.dataHandle
     }
-    return this.dataHandle
+
+    // Use promise-based lock to ensure only one open operation runs
+    if (!this.dataHandlePromise) {
+      this.dataHandlePromise = (async () => {
+        // Ensure directory exists
+        await mkdir(dirname(this.dataPath), { recursive: true })
+        const handle = await open(this.dataPath, 'r+').catch(async () => {
+          // File doesn't exist, create it
+          return open(this.dataPath, 'w+')
+        })
+        this.dataHandle = handle
+        return handle
+      })()
+    }
+
+    return this.dataHandlePromise
   }
 }

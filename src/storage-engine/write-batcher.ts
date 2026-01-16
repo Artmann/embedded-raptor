@@ -33,6 +33,7 @@ export class WriteBatcher {
   private readonly maxBatchBytes: number
 
   private dataHandle: FileHandle | null = null
+  private dataHandlePromise: Promise<FileHandle> | null = null
   private pendingWrites: PendingWrite[] = []
   private flushScheduled: boolean = false
   private currentBatchBytes: number = 0
@@ -241,13 +242,23 @@ export class WriteBatcher {
   }
 
   private async getDataHandle(): Promise<FileHandle> {
-    if (!this.dataHandle) {
-      await mkdir(dirname(this.dataPath), { recursive: true })
-      this.dataHandle = await open(this.dataPath, 'r+').catch(async () => {
-        return open(this.dataPath, 'w+')
-      })
+    if (this.dataHandle) {
+      return this.dataHandle
     }
-    return this.dataHandle
+
+    // Use promise-based lock to prevent race conditions in concurrent access
+    if (!this.dataHandlePromise) {
+      this.dataHandlePromise = (async () => {
+        await mkdir(dirname(this.dataPath), { recursive: true })
+        const handle = await open(this.dataPath, 'r+').catch(async () => {
+          return open(this.dataPath, 'w+')
+        })
+        this.dataHandle = handle
+        return handle
+      })()
+    }
+
+    return this.dataHandlePromise
   }
 
   /**
