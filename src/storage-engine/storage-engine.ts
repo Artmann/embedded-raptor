@@ -30,8 +30,7 @@ import type {
   DataRecord,
   RecordLocation,
   StorageEngineOptions,
-  OpType,
-  WriteBatcherOptions
+  OpType
 } from './types'
 
 export class StorageEngine {
@@ -176,7 +175,7 @@ export class StorageEngine {
     }
 
     if (this.writeBatcher) {
-      return this.writeRecordBatched(key, embedding, op)
+      return this.writeRecordBatched(key, embedding, op, this.writeBatcher)
     }
 
     return this.writeRecordImmediate(key, embedding, op)
@@ -188,7 +187,8 @@ export class StorageEngine {
   private async writeRecordBatched(
     key: string,
     embedding: Float32Array,
-    op: OpType
+    op: OpType,
+    batcher: WriteBatcher
   ): Promise<void> {
     await this.writeMutex.acquire()
 
@@ -210,14 +210,14 @@ export class StorageEngine {
       recordData = serializeDataRecord(record)
 
       // 2. Calculate offset (batcher tracks cumulative file size)
-      offset = this.writeBatcher!.calculateNextOffset(recordData.length)
+      offset = batcher.calculateNextOffset(recordData.length)
     } finally {
       this.writeMutex.release()
     }
 
     // 3. Queue write and wait for flush
     return new Promise<void>((resolve, reject) => {
-      this.writeBatcher!.queueWrite({
+      batcher.queueWrite({
         dataRecord: recordData,
         walEntry: {
           opType: op,
