@@ -78,5 +78,9 @@
   },
   "peerDependencies": {
     "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1"
   }
 }
