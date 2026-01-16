@@ -1,8 +1,8 @@
 /**
  * Data record serialization and deserialization.
  *
- * Binary format:
- * [magic:4][version:2][opType:1][flags:1][seqNum:8][keyLen:2][key:N][dimension:4][embedding:D*4][checksum:4][trailer:4]
+ * Binary format (v2):
+ * [magic:4][version:2][opType:1][flags:1][seqNum:8][timestamp:8][keyLen:2][key:N][dimension:4][embedding:D*4][checksum:4][trailer:4]
  */
 
 import {
@@ -28,8 +28,8 @@ export function calculateRecordSize(
   keyLength: number,
   dimension: number
 ): number {
-  // magic(4) + version(2) + opType(1) + flags(1) + seqNum(8) + keyLen(2) + key(N) + dimension(4) + embedding(D*4) + checksum(4) + trailer(4)
-  return 4 + 2 + 1 + 1 + 8 + 2 + keyLength + 4 + dimension * 4 + 4 + 4
+  // magic(4) + version(2) + opType(1) + flags(1) + seqNum(8) + timestamp(8) + keyLen(2) + key(N) + dimension(4) + embedding(D*4) + checksum(4) + trailer(4)
+  return 4 + 2 + 1 + 1 + 8 + 8 + 2 + keyLength + 4 + dimension * 4 + 4 + 4
 }
 
 /**
@@ -61,6 +61,10 @@ export function serializeDataRecord(record: DataRecord): Uint8Array {
 
   // Sequence number (8 bytes)
   view.setBigInt64(offset, record.sequenceNumber, true)
+  offset += 8
+
+  // Timestamp (8 bytes) - Unix milliseconds
+  view.setBigInt64(offset, record.timestamp, true)
   offset += 8
 
   // Key length (2 bytes)
@@ -103,8 +107,8 @@ export function deserializeDataRecord(
 ): DeserializeDataResult | null {
   const view = new DataView(data.buffer, data.byteOffset + startOffset)
 
-  // Minimum size check: header fields + minimal key + minimal embedding + checksum + trailer
-  if (data.length - startOffset < 26) {
+  // Minimum size check: header fields (26 bytes) + minimal key + minimal embedding + checksum + trailer
+  if (data.length - startOffset < 34) {
     return null
   }
 
@@ -133,6 +137,10 @@ export function deserializeDataRecord(
 
   // Sequence number
   const sequenceNumber = view.getBigInt64(offset, true)
+  offset += 8
+
+  // Timestamp
+  const timestamp = view.getBigInt64(offset, true)
   offset += 8
 
   // Key length
@@ -189,6 +197,7 @@ export function deserializeDataRecord(
     record: {
       opType,
       sequenceNumber,
+      timestamp,
       key,
       dimension,
       embedding
@@ -207,8 +216,8 @@ export function readKeyFromBuffer(
 ): string | null {
   const view = new DataView(data.buffer, data.byteOffset + startOffset)
 
-  // Check minimum size for header + keyLen
-  if (data.length - startOffset < 18) {
+  // Check minimum size for header + keyLen (26 bytes: magic(4) + version(2) + opType(1) + flags(1) + seqNum(8) + timestamp(8) + keyLen(2))
+  if (data.length - startOffset < 26) {
     return null
   }
 
@@ -218,15 +227,15 @@ export function readKeyFromBuffer(
     return null
   }
 
-  // Key length is at offset 16
-  const keyLen = view.getUint16(16, true)
+  // Key length is at offset 24 (after timestamp)
+  const keyLen = view.getUint16(24, true)
 
   // Check if we have enough data for the key
-  if (data.length - startOffset < 18 + keyLen) {
+  if (data.length - startOffset < 26 + keyLen) {
     return null
   }
 
-  const keyBytes = data.subarray(startOffset + 18, startOffset + 18 + keyLen)
+  const keyBytes = data.subarray(startOffset + 26, startOffset + 26 + keyLen)
   return new TextDecoder().decode(keyBytes)
 }
 

@@ -14,7 +14,7 @@ export const headerMagic = 0x454d4244
 // Format versions
 export const headerVersionV1 = 1 // Old binary format (no WAL)
 export const headerVersionV2 = 2 // WAL-enabled format
-export const recordVersion = 1
+export const recordVersion = 2 // v2 includes timestamp field
 export const walVersion = 1
 
 // Fixed sizes
@@ -28,8 +28,9 @@ export const dataRecordOffsets = {
   opType: 6, // 1 byte
   flags: 7, // 1 byte
   seqNum: 8, // 8 bytes (BigInt64)
-  keyLen: 16, // 2 bytes
-  key: 18 // variable, followed by dimension (4), embedding (D*4), checksum (4), trailer (4)
+  timestamp: 16, // 8 bytes (BigInt64) - Unix milliseconds
+  keyLen: 24, // 2 bytes
+  key: 26 // variable, followed by dimension (4), embedding (D*4), checksum (4), trailer (4)
 } as const
 
 // WAL entry layout (48 bytes total)
