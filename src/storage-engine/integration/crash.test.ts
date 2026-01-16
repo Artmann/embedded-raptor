@@ -38,6 +38,7 @@ describe('StorageEngine crash simulation', () => {
       const serialized = serializeDataRecord({
         opType: opType.insert,
         sequenceNumber: 1n,
+        timestamp: BigInt(Date.now()),
         key: 'orphan',
         dimension: 384,
         embedding
@@ -81,6 +82,7 @@ describe('StorageEngine crash simulation', () => {
       const orphanData = serializeDataRecord({
         opType: opType.insert,
         sequenceNumber: 999n,
+        timestamp: BigInt(Date.now()),
         key: 'orphan',
         dimension: 384,
         embedding: generateRandomEmbedding(384)
