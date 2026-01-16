@@ -55,9 +55,13 @@ function parseArgs(): BenchmarkOptions {
  */
 function cleanupFiles(baseStorePath: string, sizes: number[]): void {
   for (const size of sizes) {
-    const filePath = `${baseStorePath}-${size}.jsonl`
-    if (existsSync(filePath)) {
-      unlinkSync(filePath)
+    // Clean up all file formats: .raptor, .raptor-wal, .raptor.lock, and legacy .jsonl
+    const extensions = ['.raptor', '.raptor-wal', '.raptor.lock', '.jsonl']
+    for (const ext of extensions) {
+      const filePath = `${baseStorePath}-${size}${ext}`
+      if (existsSync(filePath)) {
+        unlinkSync(filePath)
+      }
     }
   }
 }
@@ -88,6 +92,8 @@ async function createDatabase(
   const startTime = performance.now()
   await engine.storeMany(items)
   const duration = performance.now() - startTime
+
+  await engine.dispose()
 
   console.log(`    Created in ${formatDuration(duration)}`)
 }

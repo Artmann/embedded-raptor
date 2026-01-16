@@ -75,6 +75,8 @@ export async function benchmarkGet(
 
   const random = await benchmarkRandomGet(engine, articleIds, sampleSize)
 
+  await engine.dispose()
+
   return {
     datasetSize: articles.length,
     sequentialAvgMs: sequential.avgMs,
