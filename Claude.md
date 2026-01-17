@@ -354,6 +354,28 @@ raptor store doc1 "text" --storePath ./custom.jsonl
 - Ensure strict mode compliance
 - Check `tsconfig.json` for configuration
 
+## Platform-Specific Notes
+
+### Bun on Windows
+
+**File open with numeric constants bug:**
+
+Bun on Windows has a bug where `fs.open()` fails with `ENOENT` when using
+numeric constants (`constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY`),
+even when the parent directory exists. The workaround is to use string flags
+instead:
+
+```typescript
+// Broken on Bun/Windows:
+import { constants } from 'node:fs'
+await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY)
+
+// Works everywhere:
+await open(path, 'wx') // 'wx' = O_CREAT | O_EXCL | O_WRONLY
+```
+
+This affects the `FileLock` class in `src/storage-engine/file-lock.ts`.
+
 ## Additional Resources
 
 - **CODE_STYLE.md** - Detailed code style guide and conventions

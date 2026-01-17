@@ -23,7 +23,7 @@ import {
 import { hashKey } from './wal-format'
 import { Wal } from './wal'
 import { KeyIndex } from './key-index'
-import { FileLock } from './file-lock'
+import { FileLock, ReadOnlyError } from './file-lock'
 import { Mutex } from './mutex'
 import { WriteBatcher } from './write-batcher'
 import type {
@@ -38,10 +38,11 @@ export class StorageEngine {
   private readonly walPath: string
   private readonly lockPath: string
   private readonly dimension: number
+  private readonly readOnly: boolean
 
   private readonly wal: Wal
   private readonly index: KeyIndex
-  private readonly fileLock: FileLock
+  private readonly fileLock: FileLock | null
   private readonly writeMutex: Mutex
   private readonly writeBatcher: WriteBatcher | null
 
@@ -56,9 +57,10 @@ export class StorageEngine {
     dimension: number,
     wal: Wal,
     index: KeyIndex,
-    fileLock: FileLock,
+    fileLock: FileLock | null,
     sequenceCounter: bigint,
-    writeBatcher: WriteBatcher | null
+    writeBatcher: WriteBatcher | null,
+    readOnly: boolean
   ) {
     this.dataPath = dataPath
     this.walPath = walPath
@@ -70,6 +72,7 @@ export class StorageEngine {
     this.writeMutex = new Mutex()
     this.sequenceCounter = sequenceCounter
     this.writeBatcher = writeBatcher
+    this.readOnly = readOnly
   }
 
   /**
@@ -82,33 +85,50 @@ export class StorageEngine {
     const walPath = basePath + fileExtensions.wal
     const lockPath = basePath + fileExtensions.lock
     const dimension = options.dimension ?? 384
+    const readOnly = options.readOnly ?? false
 
-    // Ensure directory exists
-    await mkdir(dirname(dataPath), { recursive: true })
-
-    // Acquire exclusive lock
-    const fileLock = new FileLock(lockPath, options.lockTimeout)
-    await fileLock.acquire()
-
-    try {
-      // Check if we need migration from v1
-      const needsMigration = await StorageEngine.checkNeedsMigration(dataPath)
-      if (needsMigration) {
-        // Migration will be handled separately
+    // Ensure directory exists (only for write mode)
+    if (!readOnly) {
+      await mkdir(dirname(dataPath), { recursive: true })
+    } else {
+      // In read-only mode, ensure the database exists
+      const dataExists = await stat(dataPath).catch(() => null)
+      const walExists = await stat(walPath).catch(() => null)
+      if (!dataExists && !walExists) {
         throw new Error(
-          `Database at ${dataPath} uses old format (v1). Please run migration first.`
+          `Cannot open database in read-only mode: no database exists at ${dataPath}`
         )
       }
+    }
 
-      // Create WAL instance
-      const wal = new Wal(walPath)
+    // Acquire exclusive lock (skip for read-only mode)
+    let fileLock: FileLock | null = null
+    if (!readOnly) {
+      fileLock = new FileLock(lockPath, options.lockTimeout)
+      await fileLock.acquire()
+    }
+
+    try {
+      // Check if we need migration from v1 (skip for read-only mode)
+      if (!readOnly) {
+        const needsMigration = await StorageEngine.checkNeedsMigration(dataPath)
+        if (needsMigration) {
+          // Migration will be handled separately
+          throw new Error(
+            `Database at ${dataPath} uses old format (v1). Please run migration first.`
+          )
+        }
+      }
+
+      // Create WAL instance (read-only mode uses it only for recovery)
+      const wal = new Wal(walPath, readOnly)
 
       // Build index from WAL (handles fresh database case)
       const { index, maxSequence } = await KeyIndex.buildFromWal(wal, dataPath)
 
-      // Create write batcher if enabled (default: true)
+      // Create write batcher if enabled (default: true) and not read-only
       let writeBatcher: WriteBatcher | null = null
-      if (options.batchingEnabled !== false) {
+      if (!readOnly && options.batchingEnabled !== false) {
         writeBatcher = new WriteBatcher(
           dataPath,
           wal,
@@ -128,10 +148,13 @@ export class StorageEngine {
         index,
         fileLock,
         maxSequence + 1n,
-        writeBatcher
+        writeBatcher,
+        readOnly
       )
     } catch (error) {
-      await fileLock.release()
+      if (fileLock) {
+        await fileLock.release()
+      }
       throw error
     }
   }
@@ -169,6 +192,10 @@ export class StorageEngine {
     embedding: Float32Array,
     op: OpType = opType.insert
   ): Promise<void> {
+    if (this.readOnly) {
+      throw new ReadOnlyError()
+    }
+
     if (embedding.length !== this.dimension) {
       throw new Error(
         `Embedding dimension mismatch: expected ${this.dimension}, got ${embedding.length}`
@@ -404,7 +431,18 @@ export class StorageEngine {
       this.dataHandle = null
     }
     await this.wal.close()
-    await this.fileLock.release()
+
+    // Only release lock if we acquired one (not in read-only mode)
+    if (this.fileLock) {
+      await this.fileLock.release()
+    }
+  }
+
+  /**
+   * Check if the storage engine is in read-only mode.
+   */
+  isReadOnly(): boolean {
+    return this.readOnly
   }
 
   /**
@@ -459,6 +497,13 @@ export class StorageEngine {
 
     // Use promise-based lock to ensure only one open operation runs
     this.dataHandlePromise ??= (async () => {
+      if (this.readOnly) {
+        // Open in read-only mode
+        const handle = await open(this.dataPath, 'r')
+        this.dataHandle = handle
+        return handle
+      }
+
       // Ensure directory exists
       await mkdir(dirname(this.dataPath), { recursive: true })
       const handle = await open(this.dataPath, 'r+').catch(async () => {
