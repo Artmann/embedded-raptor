@@ -24,6 +24,33 @@ const defaultModelUri =
 const defaultCacheDir = './.cache/models'
 const defaultDimension = 384
 
+/**
+ * Error thrown when the embedding model fails to initialize.
+ * This can happen due to missing native bindings, network issues, or invalid model files.
+ */
+export class ModelInitializationError extends Error {
+  constructor(
+    message: string,
+    public readonly cause?: Error
+  ) {
+    super(message)
+    this.name = 'ModelInitializationError'
+  }
+}
+
+/**
+ * Error thrown when embedding generation fails.
+ */
+export class EmbeddingGenerationError extends Error {
+  constructor(
+    message: string,
+    public readonly cause?: Error
+  ) {
+    super(message)
+    this.name = 'EmbeddingGenerationError'
+  }
+}
+
 // Static set of engines with loaded native resources, used by shared exit handler
 const enginesWithNativeResources = new Set<EmbeddingEngine>()
 let exitHandlerRegistered = false
@@ -152,17 +179,75 @@ export class EmbeddingEngine {
   }
 
   private async initializeModel(): Promise<void> {
-    this.llama = await getLlama({
-      logLevel: LlamaLogLevel.error // Suppress tokenizer warnings for embedding models
-    })
+    // Step 1: Initialize llama runtime
+    try {
+      this.llama = await getLlama({
+        logLevel: LlamaLogLevel.error // Suppress tokenizer warnings for embedding models
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new ModelInitializationError(
+        `Failed to initialize llama runtime. This usually means the native bindings ` +
+          `are not available for your platform.\n\n` +
+          `Original error: ${message}\n\n` +
+          `Troubleshooting:\n` +
+          `  - Ensure you have a supported platform (Windows x64, macOS arm64/x64, Linux x64)\n` +
+          `  - Try reinstalling: npm rebuild node-llama-cpp\n` +
+          `  - Check that your Node.js version is supported (18+)`,
+        error instanceof Error ? error : undefined
+      )
+    }
 
-    const modelPath = await resolveModelFile(defaultModelUri, this.cacheDir)
+    // Step 2: Download/resolve the model file
+    let modelPath: string
+    try {
+      modelPath = await resolveModelFile(defaultModelUri, this.cacheDir)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new ModelInitializationError(
+        `Failed to download or locate the embedding model.\n\n` +
+          `Model: ${defaultModelUri}\n` +
+          `Cache directory: ${this.cacheDir}\n` +
+          `Original error: ${message}\n\n` +
+          `Troubleshooting:\n` +
+          `  - Check your internet connection\n` +
+          `  - Ensure the cache directory is writable: ${this.cacheDir}\n` +
+          `  - Try deleting the cache directory and retrying`,
+        error instanceof Error ? error : undefined
+      )
+    }
 
-    this.model = await this.llama.loadModel({
-      modelPath
-    })
+    // Step 3: Load the model
+    try {
+      this.model = await this.llama.loadModel({
+        modelPath
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new ModelInitializationError(
+        `Failed to load the embedding model.\n\n` +
+          `Model path: ${modelPath}\n` +
+          `Original error: ${message}\n\n` +
+          `Troubleshooting:\n` +
+          `  - The model file may be corrupted, try deleting: ${modelPath}\n` +
+          `  - Ensure you have enough memory (~200MB required)\n` +
+          `  - Check that the model file is a valid GGUF format`,
+        error instanceof Error ? error : undefined
+      )
+    }
 
-    this.embeddingContext = await this.model.createEmbeddingContext()
+    // Step 4: Create embedding context
+    try {
+      this.embeddingContext = await this.model.createEmbeddingContext()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new ModelInitializationError(
+        `Failed to create embedding context.\n\n` +
+          `Original error: ${message}\n\n` +
+          `This model may not support embeddings or there may be insufficient memory.`,
+        error instanceof Error ? error : undefined
+      )
+    }
 
     // Register this engine for cleanup on process exit
     enginesWithNativeResources.add(this)
@@ -224,7 +309,25 @@ export class EmbeddingEngine {
     invariant(this.embeddingContext, 'Embedding context not initialized')
 
     const truncatedText = this.truncateToContextSize(text)
-    const embedding = await this.embeddingContext.getEmbeddingFor(truncatedText)
+
+    let embedding
+    try {
+      embedding = await this.embeddingContext.getEmbeddingFor(truncatedText)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const textPreview =
+        truncatedText.length > 100
+          ? truncatedText.slice(0, 100) + '...'
+          : truncatedText
+      throw new EmbeddingGenerationError(
+        `Failed to generate embedding for text.\n\n` +
+          `Text preview: "${textPreview}"\n` +
+          `Original error: ${message}\n\n` +
+          `This may be caused by invalid input or a model error.`,
+        error instanceof Error ? error : undefined
+      )
+    }
+
     const result = new Float32Array(embedding.vector)
 
     // Store in cache
