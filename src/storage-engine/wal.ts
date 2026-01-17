@@ -11,14 +11,17 @@ import type { FileHandle } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { walEntrySize } from './constants'
 import { serializeWalEntry, deserializeWalEntry } from './wal-format'
+import { ReadOnlyError } from './file-lock'
 import type { WalEntry } from './types'
 
 export class Wal {
   private readonly filePath: string
+  private readonly readOnly: boolean
   private fileHandle: FileHandle | null = null
 
-  constructor(filePath: string) {
+  constructor(filePath: string, readOnly: boolean = false) {
     this.filePath = filePath
+    this.readOnly = readOnly
   }
 
   /**
@@ -26,6 +29,10 @@ export class Wal {
    * This is the commit point - once this returns, the operation is durable.
    */
   async append(entry: WalEntry): Promise<void> {
+    if (this.readOnly) {
+      throw new ReadOnlyError()
+    }
+
     const buffer = serializeWalEntry(entry)
 
     // Ensure directory exists
@@ -45,6 +52,10 @@ export class Wal {
    * @returns The number of entries written
    */
   async appendBatch(entries: WalEntry[]): Promise<number> {
+    if (this.readOnly) {
+      throw new ReadOnlyError()
+    }
+
     if (entries.length === 0) {
       return 0
     }

@@ -18,6 +18,8 @@ export interface EngineOptions {
   storePath: string
   /** Directory to cache downloaded models (default: ./.cache/models) */
   cacheDir?: string
+  /** Open database in read-only mode (default: false). Allows concurrent reads without exclusive lock. */
+  readOnly?: boolean
 }
 
 export interface PackageJson {

@@ -8,7 +8,12 @@ import {
 } from 'node-llama-cpp'
 import invariant from 'tiny-invariant'
 
-import { StorageEngine, ensureV2Format, opType } from './storage-engine'
+import {
+  StorageEngine,
+  ensureV2Format,
+  opType,
+  ReadOnlyError
+} from './storage-engine'
 import { CandidateSet } from './candidate-set'
 import type { EmbeddingEntry, EngineOptions, SearchResult } from './types'
 
@@ -23,6 +28,7 @@ export class EmbeddingEngine {
   private storePath: string
   private cacheDir: string
   private dimension: number
+  private readonly readOnly: boolean
   private llama?: Llama
   private model?: LlamaModel
   private embeddingContext?: LlamaEmbeddingContext
@@ -35,6 +41,7 @@ export class EmbeddingEngine {
     this.storePath = options.storePath
     this.cacheDir = options.cacheDir ?? defaultCacheDir
     this.dimension = defaultDimension
+    this.readOnly = options.readOnly ?? false
   }
 
   /**
@@ -57,13 +64,16 @@ export class EmbeddingEngine {
   }
 
   private async initializeStorage(): Promise<StorageEngine> {
-    // Check and migrate from v1 format if needed
-    await ensureV2Format(this.storePath, this.dimension)
+    // Check and migrate from v1 format if needed (skip for read-only mode)
+    if (!this.readOnly) {
+      await ensureV2Format(this.storePath, this.dimension)
+    }
 
     // Create storage engine
     return StorageEngine.create({
       dataPath: this.storePath,
-      dimension: this.dimension
+      dimension: this.dimension,
+      readOnly: this.readOnly
     })
   }
 
@@ -276,6 +286,9 @@ export class EmbeddingEngine {
    * @param text - Text to embed and store
    */
   async store(key: string, text: string): Promise<void> {
+    if (this.readOnly) {
+      throw new ReadOnlyError()
+    }
     invariant(key, 'Key must be provided.')
     invariant(text, 'Text must be provided.')
 
@@ -299,6 +312,9 @@ export class EmbeddingEngine {
    * @param items - Array of {key, text} objects to store
    */
   async storeMany(items: Array<{ key: string; text: string }>): Promise<void> {
+    if (this.readOnly) {
+      throw new ReadOnlyError()
+    }
     invariant(items.length > 0, 'Items array must not be empty.')
 
     await this.ensureModelLoaded()
@@ -345,6 +361,9 @@ export class EmbeddingEngine {
    * @returns true if the entry was deleted, false if it didn't exist
    */
   async delete(key: string): Promise<boolean> {
+    if (this.readOnly) {
+      throw new ReadOnlyError()
+    }
     invariant(key, 'Key must be provided.')
 
     const storage = await this.ensureStorageEngine()
@@ -405,6 +424,13 @@ export class EmbeddingEngine {
     }
 
     return dotProduct / (magnitudeA * magnitudeB)
+  }
+
+  /**
+   * Check if the engine is in read-only mode.
+   */
+  isReadOnly(): boolean {
+    return this.readOnly
   }
 
   /**

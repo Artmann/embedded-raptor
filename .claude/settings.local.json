@@ -27,7 +27,8 @@
       "mcp__github__search_repositories",
       "mcp__deepwiki__read_wiki_structure",
       "mcp__github__get_file_contents",
-      "Bash(xxd:*)"
+      "Bash(xxd:*)",
+      "Bash(node -e:*)"
     ]
   }
 }

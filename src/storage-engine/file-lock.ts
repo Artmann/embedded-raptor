@@ -1,5 +1,4 @@
 import { mkdir, open, rm } from 'node:fs/promises'
-import { constants } from 'node:fs'
 import { dirname } from 'node:path'
 
 const defaultLockTimeout = 10_000
@@ -40,12 +39,10 @@ export class FileLock {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       try {
-        // Try to create lock file exclusively (O_CREAT | O_EXCL)
+        // Try to create lock file exclusively (O_CREAT | O_EXCL | O_WRONLY)
         // This is atomic - only one process can succeed
-        const fileHandle = await open(
-          this.filePath,
-          constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY
-        )
+        // Using 'wx' string flag for Bun compatibility on Windows
+        const fileHandle = await open(this.filePath, 'wx')
 
         // Write our PID to the lock file for debugging
         await fileHandle.write(`${process.pid}\n`)
@@ -107,6 +104,16 @@ export class DatabaseLockedError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'DatabaseLockedError'
+  }
+}
+
+/**
+ * Error thrown when attempting to write to a database opened in read-only mode.
+ */
+export class ReadOnlyError extends Error {
+  constructor(message: string = 'Cannot write to a read-only database') {
+    super(message)
+    this.name = 'ReadOnlyError'
   }
 }
 
