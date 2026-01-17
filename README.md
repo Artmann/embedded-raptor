@@ -50,6 +50,48 @@ npm install embedded-raptor
 bun add embedded-raptor
 ```
 
+## Bundler Configuration
+
+This library uses `node-llama-cpp` for local embedding generation, which includes
+platform-specific native bindings. If you're bundling your application, you'll
+need to mark these packages as external.
+
+### esbuild
+
+```js
+{
+  external: ['node-llama-cpp', '@node-llama-cpp/*']
+}
+```
+
+### Vite
+
+```js
+{
+  build: {
+    rollupOptions: {
+      external: ['node-llama-cpp', /^@node-llama-cpp\/.*/]
+    }
+  }
+}
+```
+
+### Webpack
+
+```js
+{
+  externals: ['node-llama-cpp', /^@node-llama-cpp\/.*/]
+}
+```
+
+### Rollup
+
+```js
+{
+  external: ['node-llama-cpp', /^@node-llama-cpp\/.*/]
+}
+```
+
 ## Quick Start
 
 ### Programmatic API
