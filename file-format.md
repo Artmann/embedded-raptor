@@ -1,193 +1,204 @@
-# Embedded Index Database File Format
+# Embedded Raptor Database File Format (v2)
 
 ## Overview
 
-This document describes the binary file format for the embedded index database.
-The format is designed for storing key-value pairs where values are
-fixed-dimension embedding vectors.
+This document describes the WAL-based binary file format for the Embedded Raptor
+database. The format provides durability through write-ahead logging and
+supports insert, update, and delete operations.
 
 ## Design Goals
 
-- Single file storage (similar to SQLite)
+- WAL-based durability (crash-safe)
 - Append-only writes for thread safety
-- Memory-efficient (don't require loading all keys into memory)
-- Support reverse parsing to find latest values for duplicate keys
-- Compact binary representation
+- O(1) key lookups via in-memory index
+- Support for insert, update, and delete operations
+- CRC32 checksums for corruption detection
+- Exclusive file locking for multi-process safety
 
 ## File Structure
 
-The file consists of a fixed-size header followed by variable-length records:
+The database consists of three files:
 
 ```
-[Header]
-[Record 1]
-[Record 2]
-...
-[Record N]
+database.raptor      # Data file (embeddings)
+database.raptor-wal  # Write-ahead log
+database.raptor.lock # Exclusive lock file
 ```
 
-## Header Format
+## Write Path
+
+All writes follow this sequence for durability:
+
+```
+1. Write data record to .raptor file
+2. fsync data file
+3. Write WAL entry to .raptor-wal file
+4. fsync WAL file (COMMIT POINT)
+5. Update in-memory index
+```
+
+If a crash occurs before step 4, the operation is not committed. On recovery,
+the WAL is replayed to rebuild the index.
+
+## Data File Format (.raptor)
+
+### File Header
 
 **Size:** 16 bytes (fixed)
 
-| Offset | Size | Type   | Description                              |
-| ------ | ---- | ------ | ---------------------------------------- |
-| 0      | 4    | char[] | Magic bytes: "EMBD"                      |
-| 4      | 2    | uint16 | Version number (currently 1)             |
-| 6      | 4    | uint32 | Embedding dimension (e.g., 1536)         |
-| 10     | 6    | bytes  | Reserved for future use (write as zeros) |
+| Offset | Size | Type   | Description                       |
+| ------ | ---- | ------ | --------------------------------- |
+| 0      | 4    | bytes  | Magic bytes: "EMBD" (0x454d4244)  |
+| 4      | 2    | uint16 | Version number (2 for WAL format) |
+| 6      | 4    | uint32 | Embedding dimension (e.g., 384)   |
+| 10     | 6    | bytes  | Reserved for future use (zeros)   |
 
-**Endianness:** Little-endian for all multi-byte values
+**Endianness:** Little-endian for all multi-byte values (except magic which is
+big-endian for ASCII readability)
 
-## Record Format
+### Data Record Format
 
-Each record has variable length based on the key size:
+Variable-length records appended after the header:
 
-| Field         | Size                | Type    | Description                        |
-| ------------- | ------------------- | ------- | ---------------------------------- |
-| Key Length    | 2 bytes             | uint16  | Length of key in bytes (max 65535) |
-| Key           | variable            | bytes   | UTF-8 encoded key string           |
-| Embedding     | dimension × 4 bytes | float32 | Embedding vector values            |
-| Record Length | 4 bytes             | uint32  | Total size of this record in bytes |
+| Field           | Size        | Type    | Description                             |
+| --------------- | ----------- | ------- | --------------------------------------- |
+| Magic           | 4 bytes     | uint32  | Record magic: 0xCAFEBABE                |
+| Version         | 2 bytes     | uint16  | Record version (2)                      |
+| OpType          | 1 byte      | uint8   | Operation: 0=insert, 1=update, 2=delete |
+| Flags           | 1 byte      | uint8   | Reserved (0)                            |
+| Sequence Number | 8 bytes     | int64   | Monotonic sequence number               |
+| Timestamp       | 8 bytes     | int64   | Unix timestamp in milliseconds          |
+| Key Length      | 2 bytes     | uint16  | Length of key in bytes                  |
+| Key             | variable    | bytes   | UTF-8 encoded key string                |
+| Dimension       | 4 bytes     | uint32  | Embedding dimension                     |
+| Embedding       | D × 4 bytes | float32 | Embedding vector values                 |
+| Checksum        | 4 bytes     | uint32  | CRC32 of all preceding fields           |
+| Trailer         | 4 bytes     | uint32  | Record trailer: 0xDEADBEEF              |
 
-**Record Length Calculation:**
-
-```
-record_length = 2 + key_length + (dimension × 4) + 4
-```
-
-The record length footer enables reverse parsing through the file.
-
-## Parsing Operations
-
-### Forward Parsing
-
-Start from byte 16 (after header) and read sequentially:
-
-1. Read 2 bytes → key length
-2. Read key_length bytes → key
-3. Read dimension × 4 bytes → embedding
-4. Read 4 bytes → record length (for validation)
-5. Repeat from step 1
-
-### Reverse Parsing
-
-Start from end of file and read backwards:
-
-1. Seek to current_position - 4
-2. Read 4 bytes → record length
-3. Seek backwards by record length bytes
-4. Read the complete record (key length, key, embedding, record length)
-5. Repeat from step 1
-
-## Usage Patterns
-
-### Lookup a Specific Key
-
-To find the latest value for a key:
-
-1. Start from end of file
-2. Parse records in reverse order
-3. For each record, check if key matches
-4. Return first match (latest value)
-5. If no match found, key doesn't exist
-
-**Time Complexity:** O(n) worst case where n is number of records
-
-### Load All Latest Values
-
-To get the latest value for each unique key:
-
-1. Parse from end of file backwards
-2. Maintain a `Set<string>` of keys already seen
-3. For each record:
-   - If key already in Set: skip (older value)
-   - If key not in Set: add key to Set and yield the record
-4. Continue until reaching start of file
-
-**Memory Complexity:** O(k) where k is number of unique keys
-
-### Append New Record
-
-1. Seek to end of file
-2. Calculate record length
-3. Write: key_length | key | embedding | record_length
-4. Flush to disk
-
-**Time Complexity:** O(1)
-
-## Example
-
-For a key "user123" (7 bytes) with 1536-dimension embedding:
+**Record Size Calculation:**
 
 ```
-Header: 16 bytes
-  EMBD | 0x0001 | 0x00000600 | 0x000000000000
-
-Record: 6,159 bytes total
-  0x0007                    (2 bytes: key length = 7)
-  "user123"                 (7 bytes: key)
-  [float32 × 1536]          (6,144 bytes: embedding)
-  0x0000180F                (4 bytes: record length = 6,159)
+record_size = 4 + 2 + 1 + 1 + 8 + 8 + 2 + key_length + 4 + (dimension × 4) + 4 + 4
+            = 38 + key_length + (dimension × 4)
 ```
+
+For a 384-dimension embedding with a 10-byte key:
+
+```
+38 + 10 + (384 × 4) = 1,584 bytes
+```
+
+## WAL File Format (.raptor-wal)
+
+### WAL Entry Format
+
+Fixed 48-byte entries:
+
+| Field           | Offset | Size    | Type   | Description                             |
+| --------------- | ------ | ------- | ------ | --------------------------------------- |
+| Magic           | 0      | 4 bytes | uint32 | Record magic: 0xCAFEBABE                |
+| Version         | 4      | 2 bytes | uint16 | WAL version (1)                         |
+| OpType          | 6      | 1 byte  | uint8  | Operation: 0=insert, 1=update, 2=delete |
+| Flags           | 7      | 1 byte  | uint8  | Reserved (0)                            |
+| Sequence Number | 8      | 8 bytes | int64  | Monotonic sequence number               |
+| Offset          | 16     | 8 bytes | uint64 | Byte offset in data file                |
+| Length          | 24     | 4 bytes | uint32 | Length of data record                   |
+| Key Hash        | 28     | 8 bytes | bytes  | FNV-1a hash of key (truncated)          |
+| Reserved        | 36     | 4 bytes | bytes  | Reserved for future use                 |
+| Checksum        | 40     | 4 bytes | uint32 | CRC32 of bytes 0-39                     |
+| Trailer         | 44     | 4 bytes | uint32 | Record trailer: 0xDEADBEEF              |
+
+## Lock File (.raptor.lock)
+
+A simple lock file created with exclusive flags (`O_CREAT | O_EXCL`). Contains
+the PID of the process holding the lock for debugging purposes.
+
+## Operation Types
+
+| Value | Name   | Description                                    |
+| ----- | ------ | ---------------------------------------------- |
+| 0     | INSERT | New key-value pair                             |
+| 1     | UPDATE | Update existing key                            |
+| 2     | DELETE | Logical delete (tombstone with zero embedding) |
+
+## Recovery Process
+
+On startup:
+
+1. Acquire exclusive lock
+2. Read WAL file sequentially
+3. For each valid WAL entry:
+   - Validate checksum and trailer
+   - Read key from data file at specified offset
+   - Update in-memory index with (key → {offset, length, seqNum})
+   - For DELETE operations, remove key from index
+4. Continue until EOF or corrupted entry (partial write)
+
+## Validation
+
+### Record Validation
+
+1. Check magic bytes match (0xCAFEBABE)
+2. Check version is supported
+3. Verify checksum matches computed CRC32
+4. Check trailer matches (0xDEADBEEF)
+
+### Corruption Handling
+
+- Corrupted records at end of file are ignored (partial write from crash)
+- Corrupted records in middle indicate serious corruption
+- CRC32 detects single-bit errors and most multi-bit errors
 
 ## Space Efficiency
 
-Comparison with JSONL format for 1536-dimension embedding with 20-char key:
+Comparison for 384-dimension embedding with 20-character key:
 
-| Format | Size per Record | Notes                             |
-| ------ | --------------- | --------------------------------- |
-| JSONL  | ~12,000 bytes   | JSON encoding, formatting, quotes |
-| Binary | 6,166 bytes     | 2 + 20 + 6,144 + 4                |
+| Format | Size per Record | Notes                      |
+| ------ | --------------- | -------------------------- |
+| JSONL  | ~3,200 bytes    | JSON encoding, base64, etc |
+| Binary | 1,594 bytes     | 38 + 20 + 1,536            |
 
-**Savings:** ~50% smaller, plus significantly faster to parse
+**Savings:** ~50% smaller than JSONL
 
-## Deduplication Strategy
+## Concurrency
 
-The append-only format means duplicate keys can exist in the file. The latest
-value is always the one closest to the end of the file.
+### Single Writer
 
-**Options for deduplication:**
+- Exclusive lock prevents multiple writers
+- All writes are serialized through a mutex
+- Write batching improves throughput for bulk inserts
 
-1. **On-demand:** Find latest value during lookup (as described above)
-2. **Periodic compaction:** Rebuild file with only latest values
-3. **Hybrid:** Keep recent appends, compact older sections
+### Multiple Readers (Read-Only Mode)
 
-## Future Considerations
+- Read-only mode skips lock acquisition
+- Multiple read-only instances can coexist
+- Read-only instances see snapshot at open time
+- Cannot write (throws `ReadOnlyError`)
 
-The 6 reserved bytes in the header can be used for:
+## Version History
 
-- Compression flags
-- Encryption metadata
-- Checksum algorithm identifier
-- Index file offset (for external index)
-
-The version field allows format evolution while maintaining backwards
-compatibility.
+| Version | Description                        |
+| ------- | ---------------------------------- |
+| 1       | Original binary format (no WAL)    |
+| 2       | WAL-enabled format with timestamps |
 
 ## Implementation Notes
 
 ### Thread Safety
 
-The append-only nature makes concurrent writes safe with a single mutex around
-the append operation. Multiple readers can safely read without locks since
-existing data never changes.
-
-### File Locking
-
-Consider using OS-level file locking to prevent multiple processes from opening
-the file for writing simultaneously.
+- Single writer with exclusive lock
+- Multiple concurrent readers in read-only mode
+- Write batching groups fsyncs for throughput
 
 ### Error Handling
 
-- Always validate magic bytes on open
-- Check version compatibility
-- Verify record length matches calculated size
+- Always validate magic bytes and checksums
 - Handle truncated files gracefully (partial last record)
+- Lock acquisition has configurable timeout
 
 ### Performance
 
-- Keep file handle open to avoid repeated open/close overhead
-- Use buffered I/O for sequential scans
-- Consider memory-mapped I/O for read-heavy workloads
-- For write-heavy workloads, batch appends when possible
+- In-memory index provides O(1) lookups
+- WAL enables crash recovery without full file scan
+- Write batching reduces fsync overhead
+- Embedding cache speeds up repeated searches
