@@ -24,6 +24,22 @@ const defaultModelUri =
 const defaultCacheDir = './.cache/models'
 const defaultDimension = 384
 
+// Static set of engines with loaded native resources, used by shared exit handler
+const enginesWithNativeResources = new Set<EmbeddingEngine>()
+let exitHandlerRegistered = false
+
+/**
+ * Shared exit handler that nullifies native references for all active engines.
+ * This prevents segfaults when process.exit() is called without disposing engines.
+ * Uses a single listener to avoid adding multiple exit handlers.
+ */
+function handleProcessExit(): void {
+  for (const engine of enginesWithNativeResources) {
+    engine._nullifyNativeResources()
+  }
+  enginesWithNativeResources.clear()
+}
+
 export class EmbeddingEngine {
   private storageEngine: StorageEngine | null = null
   private storePath: string
@@ -144,6 +160,13 @@ export class EmbeddingEngine {
     })
 
     this.embeddingContext = await this.model.createEmbeddingContext()
+
+    // Register this engine for cleanup on process exit
+    enginesWithNativeResources.add(this)
+    if (!exitHandlerRegistered) {
+      process.on('exit', handleProcessExit)
+      exitHandlerRegistered = true
+    }
   }
 
   /**
@@ -485,10 +508,23 @@ export class EmbeddingEngine {
   }
 
   /**
+   * Internal method called by the shared exit handler to nullify native references.
+   * @internal
+   */
+  _nullifyNativeResources(): void {
+    this.embeddingContext = undefined
+    this.model = undefined
+    this.llama = undefined
+  }
+
+  /**
    * Disposes of resources and closes the storage engine
    * Call this when you're done using the engine to free up memory
    */
   async dispose(): Promise<void> {
+    // Remove from shared exit handler tracking
+    enginesWithNativeResources.delete(this)
+
     // Clear embedding cache
     this.embeddingCache = null
 
