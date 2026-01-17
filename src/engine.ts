@@ -15,6 +15,7 @@ import {
   ReadOnlyError
 } from './storage-engine'
 import { CandidateSet } from './candidate-set'
+import { LRUCache } from './lru-cache'
 import type { EmbeddingEntry, EngineOptions, SearchResult } from './types'
 
 // Model URI for bge-small-en-v1.5 GGUF (384 dimensions, ~67MB)
@@ -36,12 +37,17 @@ export class EmbeddingEngine {
   private storageInitPromise?: Promise<StorageEngine>
   // In-memory embedding cache for faster search
   private embeddingCache: Map<string, Float32Array> | null = null
+  // LRU cache for text-to-embedding lookups (avoids regenerating embeddings for repeated text)
+  private textEmbeddingCache: LRUCache<string, Float32Array> | null = null
 
   constructor(options: EngineOptions) {
     this.storePath = options.storePath
     this.cacheDir = options.cacheDir ?? defaultCacheDir
     this.dimension = defaultDimension
     this.readOnly = options.readOnly ?? false
+    if (options.embeddingCacheSize && options.embeddingCacheSize > 0) {
+      this.textEmbeddingCache = new LRUCache(options.embeddingCacheSize)
+    }
   }
 
   /**
@@ -177,15 +183,30 @@ export class EmbeddingEngine {
   /**
    * Internal method that returns embedding as Float32Array for performance
    * Uses Float32Array throughout internal operations to avoid boxing overhead
+   * Checks the text embedding cache first to avoid regenerating embeddings
    */
   private async generateEmbeddingFloat32(text: string): Promise<Float32Array> {
+    // Check cache first
+    if (this.textEmbeddingCache) {
+      const cached = this.textEmbeddingCache.get(text)
+      if (cached) {
+        return cached
+      }
+    }
+
     await this.ensureModelLoaded()
     invariant(this.embeddingContext, 'Embedding context not initialized')
 
     const truncatedText = this.truncateToContextSize(text)
     const embedding = await this.embeddingContext.getEmbeddingFor(truncatedText)
+    const result = new Float32Array(embedding.vector)
 
-    return new Float32Array(embedding.vector)
+    // Store in cache
+    if (this.textEmbeddingCache) {
+      this.textEmbeddingCache.set(text, result)
+    }
+
+    return result
   }
 
   /**
@@ -309,6 +330,7 @@ export class EmbeddingEngine {
    * Stores multiple text embeddings in batch
    * More efficient than calling store() multiple times
    * Generates embeddings in parallel and writes records sequentially
+   * Uses text embedding cache to avoid regenerating embeddings for duplicate texts
    * @param items - Array of {key, text} objects to store
    */
   async storeMany(items: Array<{ key: string; text: string }>): Promise<void> {
@@ -321,11 +343,26 @@ export class EmbeddingEngine {
     const embeddingContext = this.embeddingContext
     invariant(embeddingContext, 'Embedding context not initialized')
 
-    // Generate embeddings in parallel (returns Float32Array directly)
+    // Generate embeddings in parallel, using cache when available
     const embeddingPromises = items.map(async (item) => {
+      // Check text embedding cache first
+      if (this.textEmbeddingCache) {
+        const cached = this.textEmbeddingCache.get(item.text)
+        if (cached) {
+          return cached
+        }
+      }
+
       const truncatedText = this.truncateToContextSize(item.text)
       const embedding = await embeddingContext.getEmbeddingFor(truncatedText)
-      return new Float32Array(embedding.vector)
+      const result = new Float32Array(embedding.vector)
+
+      // Store in text embedding cache
+      if (this.textEmbeddingCache) {
+        this.textEmbeddingCache.set(item.text, result)
+      }
+
+      return result
     })
 
     const embeddingsList = await Promise.all(embeddingPromises)
@@ -434,12 +471,32 @@ export class EmbeddingEngine {
   }
 
   /**
+   * Gets statistics about the text embedding cache.
+   * @returns Cache stats if enabled, null if cache is disabled
+   */
+  getTextEmbeddingCacheStats(): { size: number; maxSize: number } | null {
+    if (!this.textEmbeddingCache) {
+      return null
+    }
+    return {
+      size: this.textEmbeddingCache.size(),
+      maxSize: this.textEmbeddingCache.getMaxSize()
+    }
+  }
+
+  /**
    * Disposes of resources and closes the storage engine
    * Call this when you're done using the engine to free up memory
    */
   async dispose(): Promise<void> {
     // Clear embedding cache
     this.embeddingCache = null
+
+    // Clear text embedding cache
+    if (this.textEmbeddingCache) {
+      this.textEmbeddingCache.clear()
+      this.textEmbeddingCache = null
+    }
 
     // Close storage engine
     if (this.storageEngine) {
