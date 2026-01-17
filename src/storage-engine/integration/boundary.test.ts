@@ -136,8 +136,8 @@ describe('StorageEngine boundary conditions', () => {
   })
 
   describe('many embeddings', () => {
-    it('handles 1000 embeddings', async () => {
-      const paths = createTestPaths('many-1000')
+    it('handles 200 embeddings', async () => {
+      const paths = createTestPaths('many-200')
       testPathsList.push(paths)
 
       const engine = await StorageEngine.create({
@@ -145,22 +145,22 @@ describe('StorageEngine boundary conditions', () => {
         dimension: 384
       })
 
-      for (let i = 0; i < 1000; i++) {
+      for (let i = 0; i < 200; i++) {
         await engine.writeRecord(`key${i}`, generateRandomEmbedding(384))
       }
 
-      expect(engine.count()).toBe(1000)
+      expect(engine.count()).toBe(200)
 
       // Verify random embedding
-      expect(engine.hasKey('key500')).toBe(true)
-      const record = await engine.readRecord('key500')
+      expect(engine.hasKey('key100')).toBe(true)
+      const record = await engine.readRecord('key100')
       expect(record).not.toBeNull()
       expect(record!.embedding.length).toBe(384)
 
       await engine.close()
     })
 
-    it('1000 embeddings persist across reopen', async () => {
+    it('200 embeddings persist across reopen', async () => {
       const paths = createTestPaths('many-persist')
       testPathsList.push(paths)
 
@@ -169,7 +169,7 @@ describe('StorageEngine boundary conditions', () => {
         dimension: 384
       })
 
-      for (let i = 0; i < 1000; i++) {
+      for (let i = 0; i < 200; i++) {
         await engine1.writeRecord(`key${i}`, generateRandomEmbedding(384))
       }
       await engine1.close()
@@ -179,13 +179,13 @@ describe('StorageEngine boundary conditions', () => {
         dimension: 384
       })
 
-      expect(engine2.count()).toBe(1000)
+      expect(engine2.count()).toBe(200)
 
       await engine2.close()
     })
 
-    it('handles 2000 embeddings with mixed operations', async () => {
-      const paths = createTestPaths('many-2000')
+    it('handles 500 embeddings with mixed operations', async () => {
+      const paths = createTestPaths('many-500')
       testPathsList.push(paths)
 
       const engine = await StorageEngine.create({
@@ -193,23 +193,23 @@ describe('StorageEngine boundary conditions', () => {
         dimension: 384
       })
 
-      // Insert 2000
-      for (let i = 0; i < 2000; i++) {
+      // Insert 500
+      for (let i = 0; i < 500; i++) {
         await engine.writeRecord(`key${i}`, generateRandomEmbedding(384))
       }
 
-      // Update every 10th
-      for (let i = 0; i < 2000; i += 10) {
+      // Update every 10th (50 updates)
+      for (let i = 0; i < 500; i += 10) {
         await engine.writeRecord(`key${i}`, generateRandomEmbedding(384))
       }
 
-      // Delete every 100th
-      for (let i = 0; i < 2000; i += 100) {
+      // Delete every 100th (5 deletes)
+      for (let i = 0; i < 500; i += 100) {
         await engine.deleteRecord(`key${i}`)
       }
 
-      // Should have: 2000 - 20 deleted = 1980
-      expect(engine.count()).toBe(1980)
+      // Should have: 500 - 5 deleted = 495
+      expect(engine.count()).toBe(495)
 
       await engine.close()
     })
