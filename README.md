@@ -109,9 +109,18 @@ Create a new embedding engine.
 
 ```typescript
 const engine = new EmbeddingEngine({
-  storePath: './database.raptor' // Path to storage file
+  storePath: './database.raptor', // Path to storage file
+  embeddingCacheSize: 100 // Optional: cache up to 100 text-to-embedding mappings
 })
 ```
+
+**Options:**
+
+- `storePath` - Path to the database file (required)
+- `cacheDir` - Directory to cache downloaded models (default: `./.cache/models`)
+- `readOnly` - Open database in read-only mode (default: `false`)
+- `embeddingCacheSize` - Size of the LRU cache for text-to-embedding lookups
+  (default: `0` = disabled)
 
 #### `store(key, text)`
 
@@ -221,6 +230,9 @@ dimensions)
 - **Memory efficient**: Reads file in 64KB chunks, handles large databases
 - **Fast search**: Cosine similarity comparison across all embeddings
 - **Deduplication**: Latest entry automatically used for duplicate keys
+- **Embedding cache**: Use `embeddingCacheSize` to cache text-to-embedding
+  mappings and avoid regenerating embeddings for repeated text inputs (~1.7KB
+  per cached entry)
 
 ## Contributing
 

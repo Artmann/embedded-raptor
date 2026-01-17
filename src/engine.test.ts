@@ -423,4 +423,158 @@ describe('EmbeddingEngine', () => {
       expect(foundAfter).toBe(false)
     })
   })
+
+  describe('text embedding cache (embeddingCacheSize)', () => {
+    const cachedStorePath = './test-data/test-embeddings-cache.raptor'
+    const cachedWalPath = './test-data/test-embeddings-cache.raptor-wal'
+    const cachedLockPath = './test-data/test-embeddings-cache.raptor.lock'
+    let cachedEngine: EmbeddingEngine
+
+    beforeEach(async () => {
+      const dir = dirname(cachedStorePath)
+      if (!existsSync(dir)) {
+        await mkdir(dir, { recursive: true })
+      }
+
+      cachedEngine = new EmbeddingEngine({
+        storePath: cachedStorePath,
+        embeddingCacheSize: 10
+      })
+    })
+
+    afterEach(async () => {
+      try {
+        await cachedEngine.dispose()
+      } catch {
+        // Ignore errors
+      }
+
+      try {
+        if (existsSync(cachedStorePath)) {
+          await unlink(cachedStorePath)
+        }
+        if (existsSync(cachedWalPath)) {
+          await unlink(cachedWalPath)
+        }
+        if (existsSync(cachedLockPath)) {
+          await rm(cachedLockPath, { force: true })
+        }
+      } catch {
+        // Ignore errors if files don't exist
+      }
+    })
+
+    it('should return null stats when cache is disabled', () => {
+      // Default engine has no cache
+      const stats = engine.getTextEmbeddingCacheStats()
+      expect(stats).toBeNull()
+    })
+
+    it('should return cache stats when enabled', () => {
+      const stats = cachedEngine.getTextEmbeddingCacheStats()
+      expect(stats).not.toBeNull()
+      expect(stats?.size).toBe(0)
+      expect(stats?.maxSize).toBe(10)
+    })
+
+    it('should populate cache when generating embeddings', async () => {
+      await cachedEngine.generateEmbedding('hello world')
+
+      const stats = cachedEngine.getTextEmbeddingCacheStats()
+      expect(stats?.size).toBe(1)
+    })
+
+    it('should return same embedding for same text', async () => {
+      const embedding1 = await cachedEngine.generateEmbedding('test text')
+      const embedding2 = await cachedEngine.generateEmbedding('test text')
+
+      expect(embedding1).toEqual(embedding2)
+
+      const stats = cachedEngine.getTextEmbeddingCacheStats()
+      expect(stats?.size).toBe(1) // Only one entry since it's the same text
+    })
+
+    it('should cache embeddings during store', async () => {
+      await cachedEngine.store('doc1', 'unique text content')
+
+      const stats = cachedEngine.getTextEmbeddingCacheStats()
+      expect(stats?.size).toBe(1)
+    })
+
+    it('should reuse cached embeddings in storeMany with duplicate texts', async () => {
+      const items = [
+        { key: 'doc1', text: 'duplicate text' },
+        { key: 'doc2', text: 'unique text' },
+        { key: 'doc3', text: 'duplicate text' } // Same as doc1
+      ]
+
+      await cachedEngine.storeMany(items)
+
+      const stats = cachedEngine.getTextEmbeddingCacheStats()
+      expect(stats?.size).toBe(2) // Only 2 unique texts
+
+      // Verify embeddings are identical for duplicate text
+      const entry1 = await cachedEngine.get('doc1')
+      const entry3 = await cachedEngine.get('doc3')
+      expect(entry1?.embedding).toEqual(entry3?.embedding)
+    })
+
+    it('should evict LRU entries when cache is full', async () => {
+      // Create engine with small cache
+      const smallCacheEngine = new EmbeddingEngine({
+        storePath: './test-data/small-cache.raptor',
+        embeddingCacheSize: 2
+      })
+
+      try {
+        // Generate 3 embeddings (should evict first one)
+        await smallCacheEngine.generateEmbedding('text one')
+        await smallCacheEngine.generateEmbedding('text two')
+        await smallCacheEngine.generateEmbedding('text three')
+
+        const stats = smallCacheEngine.getTextEmbeddingCacheStats()
+        expect(stats?.size).toBe(2)
+        expect(stats?.maxSize).toBe(2)
+      } finally {
+        await smallCacheEngine.dispose()
+        await rm('./test-data/small-cache.raptor', { force: true })
+        await rm('./test-data/small-cache.raptor-wal', { force: true })
+        await rm('./test-data/small-cache.raptor.lock', { force: true })
+      }
+    })
+
+    it('should clear cache on dispose', async () => {
+      await cachedEngine.generateEmbedding('test text')
+
+      const statsBefore = cachedEngine.getTextEmbeddingCacheStats()
+      expect(statsBefore?.size).toBe(1)
+
+      await cachedEngine.dispose()
+
+      const statsAfter = cachedEngine.getTextEmbeddingCacheStats()
+      expect(statsAfter).toBeNull()
+    })
+
+    it('should not enable cache when embeddingCacheSize is 0', async () => {
+      const noCacheEngine = new EmbeddingEngine({
+        storePath: './test-data/no-cache.raptor',
+        embeddingCacheSize: 0
+      })
+
+      try {
+        const stats = noCacheEngine.getTextEmbeddingCacheStats()
+        expect(stats).toBeNull()
+      } finally {
+        await noCacheEngine.dispose()
+        await rm('./test-data/no-cache.raptor', { force: true })
+        await rm('./test-data/no-cache.raptor-wal', { force: true })
+        await rm('./test-data/no-cache.raptor.lock', { force: true })
+      }
+    })
+
+    it('should not enable cache when embeddingCacheSize is undefined', () => {
+      const stats = engine.getTextEmbeddingCacheStats()
+      expect(stats).toBeNull()
+    })
+  })
 })
