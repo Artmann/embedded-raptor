@@ -29,13 +29,16 @@ const enginesWithNativeResources = new Set<EmbeddingEngine>()
 let exitHandlerRegistered = false
 
 /**
- * Shared exit handler that nullifies native references for all active engines.
+ * Shared exit handler that disposes native resources for all active engines.
  * This prevents segfaults when process.exit() is called without disposing engines.
  * Uses a single listener to avoid adding multiple exit handlers.
+ *
+ * Note: We call dispose() without await since exit handlers must be synchronous.
+ * The native dispose calls may still complete before process termination.
  */
 function handleProcessExit(): void {
   for (const engine of enginesWithNativeResources) {
-    engine._nullifyNativeResources()
+    engine._disposeNativeResourcesSync()
   }
   enginesWithNativeResources.clear()
 }
@@ -508,13 +511,26 @@ export class EmbeddingEngine {
   }
 
   /**
-   * Internal method called by the shared exit handler to nullify native references.
+   * Internal method called by the shared exit handler to dispose native resources.
+   * Calls dispose without await since exit handlers must be synchronous.
    * @internal
    */
-  _nullifyNativeResources(): void {
-    this.embeddingContext = undefined
-    this.model = undefined
-    this.llama = undefined
+  _disposeNativeResourcesSync(): void {
+    try {
+      // Call dispose methods without await - they may still complete
+      // before process termination and prevent the segfault
+      if (this.embeddingContext) {
+        void this.embeddingContext.dispose()
+        this.embeddingContext = undefined
+      }
+      if (this.model) {
+        void this.model.dispose()
+        this.model = undefined
+      }
+      this.llama = undefined
+    } catch {
+      // Ignore errors during emergency cleanup
+    }
   }
 
   /**
