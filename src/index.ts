@@ -4,7 +4,11 @@ export {
   EmbeddingGenerationError
 } from './engine'
 export { LRUCache } from './lru-cache'
-export { ReadOnlyError, DatabaseLockedError } from './storage-engine'
+export {
+  ReadOnlyError,
+  DatabaseLockedError,
+  LockPermissionError
+} from './storage-engine'
 export type {
   EmbeddingEntry,
   SearchResult,

@@ -6,7 +6,12 @@
 export { StorageEngine } from './storage-engine'
 export { Wal } from './wal'
 export { KeyIndex } from './key-index'
-export { FileLock, DatabaseLockedError, ReadOnlyError } from './file-lock'
+export {
+  FileLock,
+  DatabaseLockedError,
+  ReadOnlyError,
+  LockPermissionError
+} from './file-lock'
 export { Mutex } from './mutex'
 export { WriteBatcher } from './write-batcher'
 
