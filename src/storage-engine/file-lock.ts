@@ -51,22 +51,25 @@ export class FileLock {
         this.locked = true
         return
       } catch (error) {
-        if (
-          error instanceof Error &&
-          'code' in error &&
-          error.code === 'EEXIST'
-        ) {
-          // Lock file exists - check if we should retry
-          const elapsed = Date.now() - startTime
-          if (elapsed >= this.timeoutMs) {
-            throw new DatabaseLockedError(
-              `Database is locked by another process (timeout after ${this.timeoutMs}ms): ${this.filePath}`
-            )
+        if (error instanceof Error && 'code' in error) {
+          // EEXIST: Lock file exists - another process holds the lock
+          if (error.code === 'EEXIST') {
+            const elapsed = Date.now() - startTime
+            if (elapsed >= this.timeoutMs) {
+              throw new DatabaseLockedError(
+                `Database is locked by another process (timeout after ${this.timeoutMs}ms): ${this.filePath}`
+              )
+            }
+
+            // Wait before retrying
+            await sleep(retryInterval)
+            continue
           }
 
-          // Wait before retrying
-          await sleep(retryInterval)
-          continue
+          // EACCES/EROFS: Permission denied or read-only filesystem
+          if (error.code === 'EACCES' || error.code === 'EROFS') {
+            throw new LockPermissionError(this.filePath, error)
+          }
         }
         throw error
       }
@@ -114,6 +117,29 @@ export class ReadOnlyError extends Error {
   constructor(message: string = 'Cannot write to a read-only database') {
     super(message)
     this.name = 'ReadOnlyError'
+  }
+}
+
+/**
+ * Error thrown when the lock file cannot be created due to permission issues.
+ * This typically happens in read-only filesystems or restricted environments
+ * like production containers.
+ */
+export class LockPermissionError extends Error {
+  constructor(
+    public readonly lockPath: string,
+    public readonly originalError?: Error
+  ) {
+    super(
+      `Permission denied when creating lock file: ${lockPath}\n\n` +
+        `This usually happens in read-only filesystems (e.g., production containers).\n` +
+        `If you only need to read from the database, use the 'readOnly: true' option:\n\n` +
+        `  const engine = new EmbeddingEngine({\n` +
+        `    storePath: '${lockPath.replace('.raptor.lock', '')}',\n` +
+        `    readOnly: true\n` +
+        `  })`
+    )
+    this.name = 'LockPermissionError'
   }
 }
 
