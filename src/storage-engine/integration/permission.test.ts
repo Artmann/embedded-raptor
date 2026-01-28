@@ -46,7 +46,6 @@ describe('FileLock permission errors', () => {
       const permError = error as LockPermissionError
       expect(permError.lockPath).toBe(lockPath)
       expect(permError.message).toContain('Permission denied')
-      expect(permError.message).toContain('readOnly: true')
     }
   })
 
@@ -55,8 +54,7 @@ describe('FileLock permission errors', () => {
 
     expect(error.message).toContain('Permission denied')
     expect(error.message).toContain('/app/recipe-embeddings.raptor.lock')
-    expect(error.message).toContain('readOnly: true')
-    expect(error.message).toContain('production containers')
+    expect(error.message).toContain('read-only filesystems')
     expect(error.name).toBe('LockPermissionError')
   })
 
@@ -71,21 +69,25 @@ describe('FileLock permission errors', () => {
     expect(error.lockPath).toBe('/app/recipe-embeddings.raptor.lock')
   })
 
-  it('StorageEngine throws LockPermissionError for read-only filesystem', async () => {
+  it('StorageEngine throws LockPermissionError on write to read-only filesystem', async () => {
     // /sys is a read-only virtual filesystem
     const readOnlyPath = '/sys/database.raptor'
 
+    // Creating the engine should work (no lock acquired yet)
+    const engine = await StorageEngine.create({
+      dataPath: readOnlyPath,
+      dimension: 384
+    })
+
+    // But writing should fail with permission error
     await expect(
-      StorageEngine.create({
-        dataPath: readOnlyPath,
-        dimension: 384
-      })
+      engine.writeRecord('test', generateRandomEmbedding(384))
     ).rejects.toThrow(LockPermissionError)
   })
 
-  it('readOnly mode bypasses lock file creation entirely', async () => {
+  it('read operations do not require lock file creation', async () => {
     // Create database first
-    const paths = createTestPaths('permission-readonly-bypass')
+    const paths = createTestPaths('permission-no-lock-for-read')
     testPathsList.push(paths)
 
     const writer = await StorageEngine.create({
@@ -95,16 +97,23 @@ describe('FileLock permission errors', () => {
     await writer.writeRecord('test', generateRandomEmbedding(384))
     await writer.close()
 
-    // Open in read-only mode - this should work even if we couldn't create lock
+    // Open another engine - no lock needed for reads
     const reader = await StorageEngine.create({
       dataPath: paths.dataPath,
-      dimension: 384,
-      readOnly: true
+      dimension: 384
     })
     engines.push(reader)
 
-    expect(reader.isReadOnly()).toBe(true)
+    // Should not have lock (only reads performed)
+    expect(reader.hasWriteLock()).toBe(false)
     expect(reader.count()).toBe(1)
     expect(reader.hasKey('test')).toBe(true)
+
+    // Can read the record
+    const record = await reader.readRecord('test')
+    expect(record).not.toBeNull()
+
+    // Still no lock acquired
+    expect(reader.hasWriteLock()).toBe(false)
   })
 })

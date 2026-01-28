@@ -84,8 +84,6 @@ export interface StorageEngineOptions {
   batchingEnabled?: boolean
   /** Options for write batching */
   batchOptions?: WriteBatcherOptions
-  /** Open database in read-only mode (default: false). Allows concurrent reads without exclusive lock. */
-  readOnly?: boolean
 }
 
 /**

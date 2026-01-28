@@ -133,11 +133,8 @@ export class LockPermissionError extends Error {
     super(
       `Permission denied when creating lock file: ${lockPath}\n\n` +
         `This usually happens in read-only filesystems (e.g., production containers).\n` +
-        `If you only need to read from the database, use the 'readOnly: true' option:\n\n` +
-        `  const engine = new EmbeddingEngine({\n` +
-        `    storePath: '${lockPath.replace('.raptor.lock', '')}',\n` +
-        `    readOnly: true\n` +
-        `  })`
+        `Read operations do not require a lock, only write operations.\n` +
+        `If you need to write, ensure the directory is writable.`
     )
     this.name = 'LockPermissionError'
   }

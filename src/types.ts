@@ -18,8 +18,6 @@ export interface EngineOptions {
   storePath: string
   /** Directory to cache downloaded models (default: ./.cache/models) */
   cacheDir?: string
-  /** Open database in read-only mode (default: false). Allows concurrent reads without exclusive lock. */
-  readOnly?: boolean
   /** Size of the LRU cache for text-to-embedding lookups (default: 0 = disabled) */
   embeddingCacheSize?: number
 }

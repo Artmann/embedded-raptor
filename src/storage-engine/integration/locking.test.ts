@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 /**
  * Database locking integration tests for StorageEngine.
- * Tests exclusive file locking behavior.
+ * Tests lazy exclusive file locking behavior - lock is acquired on first write.
  */
 
 import { describe, it, expect, afterEach } from 'vitest'
@@ -34,7 +34,7 @@ describe('StorageEngine locking', () => {
     testPathsList.length = 0
   })
 
-  it('storage engine opens successfully with lock', async () => {
+  it('storage engine opens without acquiring lock', async () => {
     const paths = createTestPaths('locking-open')
     testPathsList.push(paths)
 
@@ -44,12 +44,63 @@ describe('StorageEngine locking', () => {
     })
     engines.push(engine)
 
+    // No lock acquired yet
+    expect(engine.hasWriteLock()).toBe(false)
+  })
+
+  it('lock is acquired on first write', async () => {
+    const paths = createTestPaths('locking-first-write')
+    testPathsList.push(paths)
+
+    const engine = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384
+    })
+    engines.push(engine)
+
+    expect(engine.hasWriteLock()).toBe(false)
+
     await engine.writeRecord('test', generateRandomEmbedding(384))
 
+    expect(engine.hasWriteLock()).toBe(true)
     expect(engine.count()).toBe(1)
   })
 
-  it('second engine instance on same path throws DatabaseLockedError', async () => {
+  it('second engine can open same path when neither has written', async () => {
+    const paths = createTestPaths('locking-both-read')
+    testPathsList.push(paths)
+
+    // First create a database
+    const writer = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384
+    })
+    await writer.writeRecord('initial', generateRandomEmbedding(384))
+    await writer.close()
+
+    // Now open two engines
+    const engine1 = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384
+    })
+    engines.push(engine1)
+
+    const engine2 = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384
+    })
+    engines.push(engine2)
+
+    // Neither has written, so both should be able to open
+    expect(engine1.hasWriteLock()).toBe(false)
+    expect(engine2.hasWriteLock()).toBe(false)
+
+    // Both can read
+    expect(engine1.count()).toBe(1)
+    expect(engine2.count()).toBe(1)
+  })
+
+  it('second engine throws DatabaseLockedError when first has written', async () => {
     const paths = createTestPaths('locking-conflict')
     testPathsList.push(paths)
 
@@ -59,19 +110,28 @@ describe('StorageEngine locking', () => {
     })
     engines.push(engine1)
 
+    // First engine writes - acquires lock
     await engine1.writeRecord('first', generateRandomEmbedding(384))
+    expect(engine1.hasWriteLock()).toBe(true)
 
-    // Second engine should fail to acquire lock immediately (lockTimeout: 0)
+    // Second engine can open (lock not checked until write)
+    const engine2 = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384,
+      lockTimeout: 0
+    })
+    engines.push(engine2)
+
+    // Second engine can still read
+    expect(engine2.count()).toBe(1)
+
+    // But write should fail immediately (lockTimeout: 0)
     await expect(
-      StorageEngine.create({
-        dataPath: paths.dataPath,
-        dimension: 384,
-        lockTimeout: 0
-      })
+      engine2.writeRecord('second', generateRandomEmbedding(384))
     ).rejects.toThrow(DatabaseLockedError)
   })
 
-  it('after close, another instance can open', async () => {
+  it('after close, another instance can write', async () => {
     const paths = createTestPaths('locking-reopen')
     testPathsList.push(paths)
 
@@ -201,13 +261,42 @@ describe('StorageEngine locking', () => {
 
     await engine1.close()
 
-    // Lock should be released, can open new engine
+    // Lock should be released, can open new engine and write
     const engine2 = await StorageEngine.create({
       dataPath: paths.dataPath,
       dimension: 384
     })
     engines.push(engine2)
 
+    await engine2.writeRecord('new', generateRandomEmbedding(384))
     expect(engine2.hasKey('test')).toBe(true)
+    expect(engine2.hasKey('new')).toBe(true)
+  })
+
+  it('hasWriteLock returns false for engine that only reads', async () => {
+    const paths = createTestPaths('locking-check-no-write')
+    testPathsList.push(paths)
+
+    // Create database first
+    const writer = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384
+    })
+    await writer.writeRecord('test', generateRandomEmbedding(384))
+    await writer.close()
+
+    // Open reader
+    const engine = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384
+    })
+    engines.push(engine)
+
+    // Only do reads
+    await engine.readRecord('test')
+    engine.hasKey('test')
+    engine.count()
+
+    expect(engine.hasWriteLock()).toBe(false)
   })
 })

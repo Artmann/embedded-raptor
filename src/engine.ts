@@ -8,12 +8,7 @@ import {
 } from 'node-llama-cpp'
 import invariant from 'tiny-invariant'
 
-import {
-  StorageEngine,
-  ensureV2Format,
-  opType,
-  ReadOnlyError
-} from './storage-engine'
+import { StorageEngine, ensureV2Format, opType } from './storage-engine'
 import { CandidateSet } from './candidate-set'
 import { LRUCache } from './lru-cache'
 import type { EmbeddingEntry, EngineOptions, SearchResult } from './types'
@@ -75,7 +70,6 @@ export class EmbeddingEngine {
   private storePath: string
   private cacheDir: string
   private dimension: number
-  private readonly readOnly: boolean
   private llama?: Llama
   private model?: LlamaModel
   private embeddingContext?: LlamaEmbeddingContext
@@ -90,7 +84,6 @@ export class EmbeddingEngine {
     this.storePath = options.storePath
     this.cacheDir = options.cacheDir ?? defaultCacheDir
     this.dimension = defaultDimension
-    this.readOnly = options.readOnly ?? false
     if (options.embeddingCacheSize && options.embeddingCacheSize > 0) {
       this.textEmbeddingCache = new LRUCache(options.embeddingCacheSize)
     }
@@ -116,17 +109,19 @@ export class EmbeddingEngine {
   }
 
   private async initializeStorage(): Promise<StorageEngine> {
-    // Check and migrate from v1 format if needed (skip for read-only mode)
-    if (!this.readOnly) {
-      await ensureV2Format(this.storePath, this.dimension)
-    }
-
-    // Create storage engine
+    // Create storage engine (migration is handled lazily on first write)
     return StorageEngine.create({
       dataPath: this.storePath,
-      dimension: this.dimension,
-      readOnly: this.readOnly
+      dimension: this.dimension
     })
+  }
+
+  /**
+   * Ensures migration is done before first write operation.
+   * Called before any write operation.
+   */
+  private async ensureMigrated(): Promise<void> {
+    await ensureV2Format(this.storePath, this.dimension)
   }
 
   /**
@@ -431,16 +426,17 @@ export class EmbeddingEngine {
   }
 
   /**
-   * Stores a text embedding with WAL-based durability
+   * Stores a text embedding with WAL-based durability.
+   * Acquires exclusive lock on first write.
    * @param key - Unique identifier for this entry
    * @param text - Text to embed and store
    */
   async store(key: string, text: string): Promise<void> {
-    if (this.readOnly) {
-      throw new ReadOnlyError()
-    }
     invariant(key, 'Key must be provided.')
     invariant(text, 'Text must be provided.')
+
+    // Ensure migration before first write
+    await this.ensureMigrated()
 
     const embedding = await this.generateEmbeddingFloat32(text)
     const storage = await this.ensureStorageEngine()
@@ -456,17 +452,18 @@ export class EmbeddingEngine {
   }
 
   /**
-   * Stores multiple text embeddings in batch
-   * More efficient than calling store() multiple times
-   * Generates embeddings in parallel and writes records sequentially
-   * Uses text embedding cache to avoid regenerating embeddings for duplicate texts
+   * Stores multiple text embeddings in batch.
+   * More efficient than calling store() multiple times.
+   * Acquires exclusive lock on first write.
+   * Generates embeddings in parallel and writes records sequentially.
+   * Uses text embedding cache to avoid regenerating embeddings for duplicate texts.
    * @param items - Array of {key, text} objects to store
    */
   async storeMany(items: Array<{ key: string; text: string }>): Promise<void> {
-    if (this.readOnly) {
-      throw new ReadOnlyError()
-    }
     invariant(items.length > 0, 'Items array must not be empty.')
+
+    // Ensure migration before first write
+    await this.ensureMigrated()
 
     await this.ensureModelLoaded()
     const embeddingContext = this.embeddingContext
@@ -521,16 +518,17 @@ export class EmbeddingEngine {
   }
 
   /**
-   * Deletes an entry by key
-   * Logical delete - records a delete marker in the WAL
+   * Deletes an entry by key.
+   * Acquires exclusive lock on first write.
+   * Logical delete - records a delete marker in the WAL.
    * @param key - Unique identifier for the entry to delete
    * @returns true if the entry was deleted, false if it didn't exist
    */
   async delete(key: string): Promise<boolean> {
-    if (this.readOnly) {
-      throw new ReadOnlyError()
-    }
     invariant(key, 'Key must be provided.')
+
+    // Ensure migration before first write
+    await this.ensureMigrated()
 
     const storage = await this.ensureStorageEngine()
     const deleted = await storage.deleteRecord(key)
@@ -590,13 +588,6 @@ export class EmbeddingEngine {
     }
 
     return dotProduct / (magnitudeA * magnitudeB)
-  }
-
-  /**
-   * Check if the engine is in read-only mode.
-   */
-  isReadOnly(): boolean {
-    return this.readOnly
   }
 
   /**

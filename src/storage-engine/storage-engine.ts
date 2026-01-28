@@ -23,14 +23,15 @@ import {
 import { hashKey } from './wal-format'
 import { Wal } from './wal'
 import { KeyIndex } from './key-index'
-import { FileLock, ReadOnlyError } from './file-lock'
+import { FileLock } from './file-lock'
 import { Mutex } from './mutex'
 import { WriteBatcher } from './write-batcher'
 import type {
   DataRecord,
   RecordLocation,
   StorageEngineOptions,
-  OpType
+  OpType,
+  WriteBatcherOptions
 } from './types'
 
 export class StorageEngine {
@@ -38,17 +39,21 @@ export class StorageEngine {
   private readonly walPath: string
   private readonly lockPath: string
   private readonly dimension: number
-  private readonly readOnly: boolean
+  private readonly lockTimeout: number
+  private readonly batchingEnabled: boolean
+  private readonly batchOptions?: WriteBatcherOptions
 
   private readonly wal: Wal
   private readonly index: KeyIndex
-  private readonly fileLock: FileLock | null
+  private fileLock: FileLock | null = null
   private readonly writeMutex: Mutex
-  private readonly writeBatcher: WriteBatcher | null
+  private writeBatcher: WriteBatcher | null = null
 
   private dataHandle: FileHandle | null = null
   private dataHandlePromise: Promise<FileHandle> | null = null
   private sequenceCounter: bigint = 0n
+  private lockAcquired: boolean = false
+  private lockAcquirePromise: Promise<void> | null = null
 
   private constructor(
     dataPath: string,
@@ -57,10 +62,10 @@ export class StorageEngine {
     dimension: number,
     wal: Wal,
     index: KeyIndex,
-    fileLock: FileLock | null,
     sequenceCounter: bigint,
-    writeBatcher: WriteBatcher | null,
-    readOnly: boolean
+    lockTimeout: number,
+    batchingEnabled: boolean,
+    batchOptions?: WriteBatcherOptions
   ) {
     this.dataPath = dataPath
     this.walPath = walPath
@@ -68,16 +73,17 @@ export class StorageEngine {
     this.dimension = dimension
     this.wal = wal
     this.index = index
-    this.fileLock = fileLock
     this.writeMutex = new Mutex()
     this.sequenceCounter = sequenceCounter
-    this.writeBatcher = writeBatcher
-    this.readOnly = readOnly
+    this.lockTimeout = lockTimeout
+    this.batchingEnabled = batchingEnabled
+    this.batchOptions = batchOptions
   }
 
   /**
    * Create or open a storage engine.
    * Performs recovery if WAL exists.
+   * Lock is NOT acquired at creation time - it's acquired lazily on first write.
    */
   static async create(options: StorageEngineOptions): Promise<StorageEngine> {
     const basePath = options.dataPath.replace(/\.[^.]+$/, '') // Remove extension if present
@@ -85,75 +91,80 @@ export class StorageEngine {
     const walPath = basePath + fileExtensions.wal
     const lockPath = basePath + fileExtensions.lock
     const dimension = options.dimension ?? 384
-    const readOnly = options.readOnly ?? false
 
-    // Ensure directory exists (only for write mode)
-    if (!readOnly) {
-      await mkdir(dirname(dataPath), { recursive: true })
-    } else {
-      // In read-only mode, ensure the database exists
-      const dataExists = await stat(dataPath).catch(() => null)
-      const walExists = await stat(walPath).catch(() => null)
-      if (!dataExists && !walExists) {
-        throw new Error(
-          `Cannot open database in read-only mode: no database exists at ${dataPath}`
-        )
-      }
+    // Create WAL instance (not in read-only mode since we may need to write later)
+    const wal = new Wal(walPath)
+
+    // Build index from WAL (handles fresh database case)
+    const { index, maxSequence } = await KeyIndex.buildFromWal(wal, dataPath)
+
+    return new StorageEngine(
+      dataPath,
+      walPath,
+      lockPath,
+      dimension,
+      wal,
+      index,
+      maxSequence + 1n,
+      options.lockTimeout ?? 10_000,
+      options.batchingEnabled !== false,
+      options.batchOptions
+    )
+  }
+
+  /**
+   * Ensures the exclusive lock is acquired before write operations.
+   * Called lazily on first write operation.
+   */
+  private async ensureLockAcquired(): Promise<void> {
+    if (this.lockAcquired) {
+      return
     }
 
-    // Acquire exclusive lock (skip for read-only mode)
-    let fileLock: FileLock | null = null
-    if (!readOnly) {
-      fileLock = new FileLock(lockPath, options.lockTimeout)
-      await fileLock.acquire()
+    // Prevent concurrent lock acquisition
+    if (this.lockAcquirePromise) {
+      return this.lockAcquirePromise
     }
+
+    this.lockAcquirePromise = this.acquireLockAndInitialize()
+    await this.lockAcquirePromise
+  }
+
+  private async acquireLockAndInitialize(): Promise<void> {
+    // Ensure directory exists
+    await mkdir(dirname(this.dataPath), { recursive: true })
+
+    // Check if we need migration from v1
+    const needsMigration = await StorageEngine.checkNeedsMigration(this.dataPath)
+    if (needsMigration) {
+      throw new Error(
+        `Database at ${this.dataPath} uses old format (v1). Please run migration first.`
+      )
+    }
+
+    // Acquire exclusive lock
+    this.fileLock = new FileLock(this.lockPath, this.lockTimeout)
+    await this.fileLock.acquire()
 
     try {
-      // Check if we need migration from v1 (skip for read-only mode)
-      if (!readOnly) {
-        const needsMigration = await StorageEngine.checkNeedsMigration(dataPath)
-        if (needsMigration) {
-          // Migration will be handled separately
-          throw new Error(
-            `Database at ${dataPath} uses old format (v1). Please run migration first.`
-          )
-        }
-      }
-
-      // Create WAL instance (read-only mode uses it only for recovery)
-      const wal = new Wal(walPath, readOnly)
-
-      // Build index from WAL (handles fresh database case)
-      const { index, maxSequence } = await KeyIndex.buildFromWal(wal, dataPath)
-
-      // Create write batcher if enabled (default: true) and not read-only
-      let writeBatcher: WriteBatcher | null = null
-      if (!readOnly && options.batchingEnabled !== false) {
-        writeBatcher = new WriteBatcher(
-          dataPath,
-          wal,
-          index,
-          dimension,
-          options.batchOptions
+      // Create write batcher if enabled (default: true)
+      if (this.batchingEnabled) {
+        this.writeBatcher = new WriteBatcher(
+          this.dataPath,
+          this.wal,
+          this.index,
+          this.dimension,
+          this.batchOptions
         )
-        await writeBatcher.initialize()
+        await this.writeBatcher.initialize()
       }
 
-      return new StorageEngine(
-        dataPath,
-        walPath,
-        lockPath,
-        dimension,
-        wal,
-        index,
-        fileLock,
-        maxSequence + 1n,
-        writeBatcher,
-        readOnly
-      )
+      this.lockAcquired = true
     } catch (error) {
-      if (fileLock) {
-        await fileLock.release()
+      // Release lock on failure
+      if (this.fileLock) {
+        await this.fileLock.release()
+        this.fileLock = null
       }
       throw error
     }
@@ -185,6 +196,7 @@ export class StorageEngine {
 
   /**
    * Write a record to storage.
+   * Acquires exclusive lock on first write.
    * Implements: data → fsync → WAL → fsync → index
    */
   async writeRecord(
@@ -192,9 +204,8 @@ export class StorageEngine {
     embedding: Float32Array,
     op: OpType = opType.insert
   ): Promise<void> {
-    if (this.readOnly) {
-      throw new ReadOnlyError()
-    }
+    // Acquire lock lazily on first write
+    await this.ensureLockAcquired()
 
     if (embedding.length !== this.dimension) {
       throw new Error(
@@ -432,24 +443,24 @@ export class StorageEngine {
     }
     await this.wal.close()
 
-    // Only release lock if we acquired one (not in read-only mode)
+    // Release lock if we acquired one
     if (this.fileLock) {
       await this.fileLock.release()
     }
   }
 
   /**
-   * Check if the storage engine is in read-only mode.
+   * Check if the storage engine has acquired the write lock.
    */
-  isReadOnly(): boolean {
-    return this.readOnly
+  hasWriteLock(): boolean {
+    return this.lockAcquired
   }
 
   /**
    * Append data to the data file.
    */
   private async appendToDataFile(data: Uint8Array): Promise<number> {
-    const dataHandle = await this.getDataHandle()
+    const dataHandle = await this.getDataHandleForWrite()
 
     // Get current file size (this is where we'll append)
     const stats = await stat(this.dataPath).catch(() => ({ size: 0 }))
@@ -489,6 +500,7 @@ export class StorageEngine {
   /**
    * Get or open the data file handle.
    * Uses promise-based locking to prevent race conditions in concurrent access.
+   * Opens in read mode for reads, upgraded to read-write when lock is acquired.
    */
   private async getDataHandle(): Promise<FileHandle> {
     if (this.dataHandle) {
@@ -497,13 +509,40 @@ export class StorageEngine {
 
     // Use promise-based lock to ensure only one open operation runs
     this.dataHandlePromise ??= (async () => {
-      if (this.readOnly) {
-        // Open in read-only mode
-        const handle = await open(this.dataPath, 'r')
-        this.dataHandle = handle
-        return handle
-      }
+      // Try to open for reading first (works for read operations)
+      const handle = await open(this.dataPath, 'r').catch(async () => {
+        // File doesn't exist - only create if we have the lock
+        if (this.lockAcquired) {
+          await mkdir(dirname(this.dataPath), { recursive: true })
+          return open(this.dataPath, 'w+')
+        }
+        throw new Error(`Database file does not exist: ${this.dataPath}`)
+      })
+      this.dataHandle = handle
+      return handle
+    })()
 
+    return this.dataHandlePromise
+  }
+
+  /**
+   * Get or open the data file handle for writing.
+   * Creates the file if it doesn't exist.
+   */
+  private async getDataHandleForWrite(): Promise<FileHandle> {
+    // Close any read-only handle first
+    if (this.dataHandle && !this.lockAcquired) {
+      await this.dataHandle.close()
+      this.dataHandle = null
+      this.dataHandlePromise = null
+    }
+
+    if (this.dataHandle) {
+      return this.dataHandle
+    }
+
+    // Use promise-based lock to ensure only one open operation runs
+    this.dataHandlePromise ??= (async () => {
       // Ensure directory exists
       await mkdir(dirname(this.dataPath), { recursive: true })
       const handle = await open(this.dataPath, 'r+').catch(async () => {
