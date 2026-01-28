@@ -87,4 +87,13 @@ export class LRUCache<K, V> {
   size(): number {
     return this.cache.size
   }
+
+  /**
+   * Deletes an entry from the cache.
+   * @param key - The key to delete
+   * @returns true if the entry was deleted, false if it didn't exist
+   */
+  delete(key: K): boolean {
+    return this.cache.delete(key)
+  }
 }

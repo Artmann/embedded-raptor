@@ -182,6 +182,34 @@ describe('LRUCache', () => {
     })
   })
 
+  describe('delete', () => {
+    it('should remove existing entry and return true', () => {
+      cache.set('a', 1)
+      cache.set('b', 2)
+
+      expect(cache.delete('a')).toBe(true)
+      expect(cache.size()).toBe(1)
+      expect(cache.get('a')).toBeUndefined()
+      expect(cache.get('b')).toBe(2)
+    })
+
+    it('should return false for non-existent key', () => {
+      cache.set('a', 1)
+
+      expect(cache.delete('nonexistent')).toBe(false)
+      expect(cache.size()).toBe(1)
+    })
+
+    it('should allow re-adding deleted key', () => {
+      cache.set('a', 1)
+      cache.delete('a')
+      cache.set('a', 10)
+
+      expect(cache.get('a')).toBe(10)
+      expect(cache.size()).toBe(1)
+    })
+  })
+
   describe('with Float32Array values', () => {
     it('should work with Float32Array values', () => {
       const floatCache = new LRUCache<string, Float32Array>(2)

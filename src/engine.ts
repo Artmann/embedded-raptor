@@ -81,18 +81,29 @@ export class EmbeddingEngine {
   private embeddingContext?: LlamaEmbeddingContext
   private initPromise?: Promise<void>
   private storageInitPromise?: Promise<StorageEngine>
-  // In-memory embedding cache for faster search
+  // In-memory embedding cache for faster search (eager mode)
   private embeddingCache: Map<string, Float32Array> | null = null
+  // LRU cache for embeddings when lazy mode is enabled
+  private lazyEmbeddingCache: LRUCache<string, Float32Array> | null = null
   // LRU cache for text-to-embedding lookups (avoids regenerating embeddings for repeated text)
   private textEmbeddingCache: LRUCache<string, Float32Array> | null = null
+  // Lazy embedding mode settings
+  private readonly lazyEmbeddings: boolean
+  private readonly maxEmbeddingsInMemory: number
 
   constructor(options: EngineOptions) {
     this.storePath = options.storePath
     this.cacheDir = options.cacheDir ?? defaultCacheDir
     this.dimension = defaultDimension
     this.readOnly = options.readOnly ?? false
+    this.lazyEmbeddings = options.lazyEmbeddings ?? false
+    this.maxEmbeddingsInMemory = options.maxEmbeddingsInMemory ?? 1000
     if (options.embeddingCacheSize && options.embeddingCacheSize > 0) {
       this.textEmbeddingCache = new LRUCache(options.embeddingCacheSize)
+    }
+    // Initialize lazy embedding cache if lazy mode is enabled
+    if (this.lazyEmbeddings && this.maxEmbeddingsInMemory > 0) {
+      this.lazyEmbeddingCache = new LRUCache(this.maxEmbeddingsInMemory)
     }
   }
 
@@ -158,6 +169,44 @@ export class EmbeddingEngine {
    */
   private invalidateEmbeddingCache(): void {
     this.embeddingCache = null
+  }
+
+  /**
+   * Gets an embedding from the lazy cache or loads it from disk.
+   * Used in lazy mode to load embeddings on-demand during search.
+   * @param key - The key to look up
+   * @param storage - The storage engine instance
+   * @returns The embedding, or null if not found
+   */
+  private async getEmbeddingLazy(
+    key: string,
+    storage: StorageEngine
+  ): Promise<Float32Array | null> {
+    // Check LRU cache first
+    if (this.lazyEmbeddingCache) {
+      const cached = this.lazyEmbeddingCache.get(key)
+      if (cached) {
+        return cached
+      }
+    }
+
+    // Load from disk
+    const location = storage.getLocation(key)
+    if (!location) {
+      return null
+    }
+
+    const embedding = await storage.readEmbeddingAt(location.offset)
+    if (!embedding) {
+      return null
+    }
+
+    // Store in LRU cache
+    if (this.lazyEmbeddingCache) {
+      this.lazyEmbeddingCache.set(key, embedding)
+    }
+
+    return embedding
   }
 
   /**
@@ -403,23 +452,41 @@ export class EmbeddingEngine {
     const queryEmbedding = await this.generateEmbeddingFloat32(query)
     const candidateSet = new CandidateSet(limit)
 
-    // Load embeddings into cache if not already cached
-    const cache = await this.ensureEmbeddingCache(storage)
+    if (this.lazyEmbeddings) {
+      // Lazy mode: load embeddings on-demand with LRU caching
+      for (const key of storage.keys()) {
+        const embedding = await this.getEmbeddingLazy(key, storage)
+        if (!embedding) {
+          continue
+        }
 
-    // Iterate through all entries using cached embeddings
-    for (const key of storage.keys()) {
-      const embedding = cache.get(key)
-      if (!embedding) {
-        continue
+        const similarity = this.cosineSimilarity(queryEmbedding, embedding)
+
+        if (similarity < minSimilarity) {
+          continue
+        }
+
+        candidateSet.add(key, similarity)
       }
+    } else {
+      // Eager mode: load all embeddings into cache upfront
+      const cache = await this.ensureEmbeddingCache(storage)
 
-      const similarity = this.cosineSimilarity(queryEmbedding, embedding)
+      // Iterate through all entries using cached embeddings
+      for (const key of storage.keys()) {
+        const embedding = cache.get(key)
+        if (!embedding) {
+          continue
+        }
 
-      if (similarity < minSimilarity) {
-        continue
+        const similarity = this.cosineSimilarity(queryEmbedding, embedding)
+
+        if (similarity < minSimilarity) {
+          continue
+        }
+
+        candidateSet.add(key, similarity)
       }
-
-      candidateSet.add(key, similarity)
     }
 
     const results: SearchResult[] = candidateSet.getEntries().map((entry) => ({
@@ -452,6 +519,10 @@ export class EmbeddingEngine {
     // Update cache if it exists (avoid invalidating entire cache)
     if (this.embeddingCache !== null) {
       this.embeddingCache.set(key, embedding)
+    }
+    // Update lazy cache if enabled
+    if (this.lazyEmbeddingCache) {
+      this.lazyEmbeddingCache.set(key, embedding)
     }
   }
 
@@ -518,6 +589,12 @@ export class EmbeddingEngine {
         this.embeddingCache.set(items[i].key, embeddingsList[i])
       }
     }
+    // Update lazy cache if enabled
+    if (this.lazyEmbeddingCache) {
+      for (let i = 0; i < items.length; i++) {
+        this.lazyEmbeddingCache.set(items[i].key, embeddingsList[i])
+      }
+    }
   }
 
   /**
@@ -538,6 +615,10 @@ export class EmbeddingEngine {
     // Remove from cache if it exists
     if (deleted && this.embeddingCache !== null) {
       this.embeddingCache.delete(key)
+    }
+    // Remove from lazy cache if enabled
+    if (deleted && this.lazyEmbeddingCache) {
+      this.lazyEmbeddingCache.delete(key)
     }
 
     return deleted
@@ -614,6 +695,27 @@ export class EmbeddingEngine {
   }
 
   /**
+   * Gets statistics about the lazy embedding cache.
+   * @returns Cache stats if lazy mode is enabled, null otherwise
+   */
+  getLazyEmbeddingCacheStats(): { size: number; maxSize: number } | null {
+    if (!this.lazyEmbeddingCache) {
+      return null
+    }
+    return {
+      size: this.lazyEmbeddingCache.size(),
+      maxSize: this.lazyEmbeddingCache.getMaxSize()
+    }
+  }
+
+  /**
+   * Check if lazy embedding mode is enabled.
+   */
+  isLazyEmbeddingsEnabled(): boolean {
+    return this.lazyEmbeddings
+  }
+
+  /**
    * Internal method called by the shared exit handler to dispose native resources.
    * Calls dispose without await since exit handlers must be synchronous.
    * @internal
@@ -651,6 +753,12 @@ export class EmbeddingEngine {
     if (this.textEmbeddingCache) {
       this.textEmbeddingCache.clear()
       this.textEmbeddingCache = null
+    }
+
+    // Clear lazy embedding cache
+    if (this.lazyEmbeddingCache) {
+      this.lazyEmbeddingCache.clear()
+      this.lazyEmbeddingCache = null
     }
 
     // Close storage engine

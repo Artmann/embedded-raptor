@@ -366,6 +366,14 @@ export class StorageEngine {
   }
 
   /**
+   * Get the location of a record by key.
+   * O(1) lookup via index.
+   */
+  getLocation(key: string): RecordLocation | undefined {
+    return this.index.get(key)
+  }
+
+  /**
    * Get the number of records.
    */
   count(): number {

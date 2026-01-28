@@ -22,6 +22,17 @@ export interface EngineOptions {
   readOnly?: boolean
   /** Size of the LRU cache for text-to-embedding lookups (default: 0 = disabled) */
   embeddingCacheSize?: number
+  /**
+   * Enable lazy embedding loading mode (default: false).
+   * When enabled, embeddings are loaded on-demand during search instead of all at once.
+   * This reduces memory usage for large databases at the cost of slower first-time searches.
+   */
+  lazyEmbeddings?: boolean
+  /**
+   * Maximum number of embeddings to keep in memory when lazy mode is enabled (default: 1000).
+   * Uses LRU eviction when the limit is reached. Only applies when lazyEmbeddings is true.
+   */
+  maxEmbeddingsInMemory?: number
 }
 
 export interface PackageJson {

@@ -577,4 +577,208 @@ describe('EmbeddingEngine', () => {
       expect(stats).toBeNull()
     })
   })
+
+  describe('lazy embedding mode (lazyEmbeddings)', () => {
+    const lazyStorePath = './test-data/test-embeddings-lazy.raptor'
+    const lazyWalPath = './test-data/test-embeddings-lazy.raptor-wal'
+    const lazyLockPath = './test-data/test-embeddings-lazy.raptor.lock'
+    let lazyEngine: EmbeddingEngine
+
+    beforeEach(async () => {
+      const dir = dirname(lazyStorePath)
+      if (!existsSync(dir)) {
+        await mkdir(dir, { recursive: true })
+      }
+
+      lazyEngine = new EmbeddingEngine({
+        storePath: lazyStorePath,
+        lazyEmbeddings: true,
+        maxEmbeddingsInMemory: 10
+      })
+    })
+
+    afterEach(async () => {
+      try {
+        await lazyEngine.dispose()
+      } catch {
+        // Ignore errors
+      }
+
+      try {
+        if (existsSync(lazyStorePath)) {
+          await unlink(lazyStorePath)
+        }
+        if (existsSync(lazyWalPath)) {
+          await unlink(lazyWalPath)
+        }
+        if (existsSync(lazyLockPath)) {
+          await rm(lazyLockPath, { force: true })
+        }
+      } catch {
+        // Ignore errors if files don't exist
+      }
+    })
+
+    it('should report lazy mode is enabled', () => {
+      expect(lazyEngine.isLazyEmbeddingsEnabled()).toBe(true)
+    })
+
+    it('should report lazy mode is disabled by default', () => {
+      expect(engine.isLazyEmbeddingsEnabled()).toBe(false)
+    })
+
+    it('should return lazy cache stats when enabled', () => {
+      const stats = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(stats).not.toBeNull()
+      expect(stats?.size).toBe(0)
+      expect(stats?.maxSize).toBe(10)
+    })
+
+    it('should return null lazy cache stats when disabled', () => {
+      const stats = engine.getLazyEmbeddingCacheStats()
+      expect(stats).toBeNull()
+    })
+
+    it('should search correctly in lazy mode', async () => {
+      await lazyEngine.store('doc1', 'Machine learning is a subset of AI')
+      await lazyEngine.store('doc2', 'Bun is a fast JavaScript runtime')
+      await lazyEngine.store('doc3', 'The quick brown fox jumps over the lazy dog')
+
+      const results = await lazyEngine.search('artificial intelligence', 3, 0)
+
+      expect(results.length).toBeGreaterThan(0)
+      expect(results[0].key).toBeDefined()
+      expect(results[0].similarity).toBeTypeOf('number')
+    })
+
+    it('should populate lazy cache during search', async () => {
+      await lazyEngine.store('doc1', 'Test content one')
+      await lazyEngine.store('doc2', 'Test content two')
+
+      const statsBefore = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(statsBefore?.size).toBe(2) // Both stored during store()
+
+      // Create a fresh engine to test loading from disk
+      await lazyEngine.dispose()
+
+      lazyEngine = new EmbeddingEngine({
+        storePath: lazyStorePath,
+        lazyEmbeddings: true,
+        maxEmbeddingsInMemory: 10
+      })
+
+      const statsAfterReload = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(statsAfterReload?.size).toBe(0) // Cache empty after reload
+
+      await lazyEngine.search('test', 3, 0)
+
+      const statsAfterSearch = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(statsAfterSearch?.size).toBe(2) // Both loaded during search
+    })
+
+    it('should evict LRU entries when lazy cache is full', async () => {
+      const smallCacheEngine = new EmbeddingEngine({
+        storePath: './test-data/small-lazy-cache.raptor',
+        lazyEmbeddings: true,
+        maxEmbeddingsInMemory: 2
+      })
+
+      try {
+        // Store 3 entries
+        await smallCacheEngine.store('doc1', 'Content one')
+        await smallCacheEngine.store('doc2', 'Content two')
+        await smallCacheEngine.store('doc3', 'Content three')
+
+        // Cache should only have 2 entries (evicted oldest)
+        const stats = smallCacheEngine.getLazyEmbeddingCacheStats()
+        expect(stats?.size).toBe(2)
+        expect(stats?.maxSize).toBe(2)
+      } finally {
+        await smallCacheEngine.dispose()
+        await rm('./test-data/small-lazy-cache.raptor', { force: true })
+        await rm('./test-data/small-lazy-cache.raptor-wal', { force: true })
+        await rm('./test-data/small-lazy-cache.raptor.lock', { force: true })
+      }
+    })
+
+    it('should update lazy cache on store', async () => {
+      await lazyEngine.store('doc1', 'Original content')
+
+      const stats1 = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(stats1?.size).toBe(1)
+
+      await lazyEngine.store('doc2', 'New content')
+
+      const stats2 = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(stats2?.size).toBe(2)
+    })
+
+    it('should remove from lazy cache on delete', async () => {
+      await lazyEngine.store('doc1', 'Content one')
+      await lazyEngine.store('doc2', 'Content two')
+
+      const statsBefore = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(statsBefore?.size).toBe(2)
+
+      await lazyEngine.delete('doc1')
+
+      const statsAfter = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(statsAfter?.size).toBe(1)
+    })
+
+    it('should clear lazy cache on dispose', async () => {
+      await lazyEngine.store('doc1', 'Test content')
+
+      const statsBefore = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(statsBefore?.size).toBe(1)
+
+      await lazyEngine.dispose()
+
+      const statsAfter = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(statsAfter).toBeNull()
+    })
+
+    it('should not return deleted entries in search (lazy mode)', async () => {
+      await lazyEngine.store('doc1', 'artificial intelligence AI ML')
+      await lazyEngine.store('doc2', 'cooking recipes and food')
+
+      const resultsBefore = await lazyEngine.search('machine learning', 10, 0)
+      const foundBefore = resultsBefore.some((r) => r.key === 'doc1')
+      expect(foundBefore).toBe(true)
+
+      await lazyEngine.delete('doc1')
+
+      const resultsAfter = await lazyEngine.search('machine learning', 10, 0)
+      const foundAfter = resultsAfter.some((r) => r.key === 'doc1')
+      expect(foundAfter).toBe(false)
+    })
+
+    it('should respect minSimilarity in lazy mode', async () => {
+      await lazyEngine.store('doc1', 'Machine learning AI')
+      await lazyEngine.store('doc2', 'Cooking recipes')
+      await lazyEngine.store('doc3', 'Unrelated random content')
+
+      const results = await lazyEngine.search('artificial intelligence', 10, 0.7)
+
+      for (const result of results) {
+        expect(result.similarity).toBeGreaterThanOrEqual(0.7)
+      }
+    })
+
+    it('should work with storeMany in lazy mode', async () => {
+      const items = [
+        { key: 'doc1', text: 'Machine learning is powerful' },
+        { key: 'doc2', text: 'Artificial intelligence applications' },
+        { key: 'doc3', text: 'Cooking recipes and food' }
+      ]
+
+      await lazyEngine.storeMany(items)
+
+      const stats = lazyEngine.getLazyEmbeddingCacheStats()
+      expect(stats?.size).toBe(3)
+
+      const results = await lazyEngine.search('AI and ML', 3)
+      expect(results.length).toBeGreaterThan(0)
+    })
+  })
 })
