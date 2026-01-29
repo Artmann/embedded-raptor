@@ -1,12 +1,18 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 /**
  * Database locking integration tests for StorageEngine.
- * Tests exclusive file locking behavior.
+ * Tests operation-level file locking behavior.
+ *
+ * With operation-level locking:
+ * - Engine creation does NOT acquire any lock
+ * - Locks are acquired per write operation and released immediately after
+ * - Multiple engine instances can coexist (single-process only)
  */
 
 import { describe, it, expect, afterEach } from 'vitest'
+import { stat } from 'node:fs/promises'
 import { StorageEngine } from '../storage-engine'
-import { DatabaseLockedError } from '../file-lock'
+import { fileExtensions } from '../constants'
 import {
   createTestPaths,
   cleanup,
@@ -34,7 +40,7 @@ describe('StorageEngine locking', () => {
     testPathsList.length = 0
   })
 
-  it('storage engine opens successfully with lock', async () => {
+  it('storage engine opens successfully and can write', async () => {
     const paths = createTestPaths('locking-open')
     testPathsList.push(paths)
 
@@ -49,8 +55,46 @@ describe('StorageEngine locking', () => {
     expect(engine.count()).toBe(1)
   })
 
-  it('second engine instance on same path throws DatabaseLockedError', async () => {
-    const paths = createTestPaths('locking-conflict')
+  it('engine creation does not create lock file', async () => {
+    const paths = createTestPaths('no-lock-on-create')
+    testPathsList.push(paths)
+
+    const engine = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384
+    })
+    engines.push(engine)
+
+    // Lock file should not exist after creating engine (before any writes)
+    const basePath = paths.dataPath.replace(/\.[^.]+$/, '')
+    const lockPath = basePath + fileExtensions.lock
+    const lockExists = await stat(lockPath).catch(() => null)
+
+    expect(lockExists).toBeNull()
+  })
+
+  it('lock file is cleaned up after write operation', async () => {
+    const paths = createTestPaths('lock-cleanup')
+    testPathsList.push(paths)
+
+    const engine = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384
+    })
+    engines.push(engine)
+
+    await engine.writeRecord('test', generateRandomEmbedding(384))
+
+    // Lock file should be removed after write completes
+    const basePath = paths.dataPath.replace(/\.[^.]+$/, '')
+    const lockPath = basePath + fileExtensions.lock
+    const lockExists = await stat(lockPath).catch(() => null)
+
+    expect(lockExists).toBeNull()
+  })
+
+  it('multiple engine instances can coexist in same process', async () => {
+    const paths = createTestPaths('multi-instance')
     testPathsList.push(paths)
 
     const engine1 = await StorageEngine.create({
@@ -61,43 +105,42 @@ describe('StorageEngine locking', () => {
 
     await engine1.writeRecord('first', generateRandomEmbedding(384))
 
-    // Second engine should fail to acquire lock immediately (lockTimeout: 0)
-    await expect(
-      StorageEngine.create({
-        dataPath: paths.dataPath,
-        dimension: 384,
-        lockTimeout: 0
-      })
-    ).rejects.toThrow(DatabaseLockedError)
-  })
-
-  it('after close, another instance can open', async () => {
-    const paths = createTestPaths('locking-reopen')
-    testPathsList.push(paths)
-
-    const embedding1 = generateRandomEmbedding(384)
-    const embedding2 = generateRandomEmbedding(384)
-
-    const engine1 = await StorageEngine.create({
-      dataPath: paths.dataPath,
-      dimension: 384
-    })
-
-    await engine1.writeRecord('first', embedding1)
-    await engine1.close()
-
+    // Second engine on same path should succeed (operation-level locking)
     const engine2 = await StorageEngine.create({
       dataPath: paths.dataPath,
       dimension: 384
     })
     engines.push(engine2)
 
-    // Engine2 should be able to acquire lock now
-    await engine2.writeRecord('second', embedding2)
-
-    expect(engine2.count()).toBe(2)
+    // Both engines should see the same data
+    expect(engine1.hasKey('first')).toBe(true)
     expect(engine2.hasKey('first')).toBe(true)
-    expect(engine2.hasKey('second')).toBe(true)
+  })
+
+  it('two sequential writes from same process both succeed', async () => {
+    const paths = createTestPaths('sequential-writes')
+    testPathsList.push(paths)
+
+    const engine = await StorageEngine.create({
+      dataPath: paths.dataPath,
+      dimension: 384
+    })
+    engines.push(engine)
+
+    const embedding1 = generateRandomEmbedding(384)
+    const embedding2 = generateRandomEmbedding(384)
+
+    await engine.writeRecord('key1', embedding1)
+    await engine.writeRecord('key2', embedding2)
+
+    expect(engine.count()).toBe(2)
+    expect(engine.hasKey('key1')).toBe(true)
+    expect(engine.hasKey('key2')).toBe(true)
+
+    const record1 = await engine.readRecord('key1')
+    const record2 = await engine.readRecord('key2')
+    expect(embeddingsEqual(record1!.embedding, embedding1)).toBe(true)
+    expect(embeddingsEqual(record2!.embedding, embedding2)).toBe(true)
   })
 
   it('close is idempotent', async () => {
@@ -181,7 +224,7 @@ describe('StorageEngine locking', () => {
     }
   })
 
-  it('lock is released on engine close even after errors', async () => {
+  it('lock is released after write even when dimension error occurs', async () => {
     const paths = createTestPaths('locking-error-release')
     testPathsList.push(paths)
 
@@ -189,6 +232,7 @@ describe('StorageEngine locking', () => {
       dataPath: paths.dataPath,
       dimension: 384
     })
+    engines.push(engine1)
 
     await engine1.writeRecord('test', generateRandomEmbedding(384))
 
@@ -199,9 +243,8 @@ describe('StorageEngine locking', () => {
       // Expected to fail
     }
 
-    await engine1.close()
-
-    // Lock should be released, can open new engine
+    // Lock should be released (no session lock to release)
+    // Can still write with another engine instance
     const engine2 = await StorageEngine.create({
       dataPath: paths.dataPath,
       dimension: 384
@@ -209,5 +252,7 @@ describe('StorageEngine locking', () => {
     engines.push(engine2)
 
     expect(engine2.hasKey('test')).toBe(true)
+    await engine2.writeRecord('another', generateRandomEmbedding(384))
+    expect(engine2.hasKey('another')).toBe(true)
   })
 })

@@ -3,6 +3,9 @@
  *
  * Implements the write path: data → fsync → WAL → fsync → index
  * Handles recovery on startup by rebuilding index from WAL.
+ *
+ * Uses operation-level locking: locks are acquired per write operation
+ * and released immediately after, rather than held for the engine lifetime.
  */
 
 import { open, stat, mkdir } from 'node:fs/promises'
@@ -25,7 +28,6 @@ import { Wal } from './wal'
 import { KeyIndex } from './key-index'
 import { FileLock, ReadOnlyError } from './file-lock'
 import { Mutex } from './mutex'
-import { WriteBatcher } from './write-batcher'
 import type {
   DataRecord,
   RecordLocation,
@@ -37,14 +39,13 @@ export class StorageEngine {
   private readonly dataPath: string
   private readonly walPath: string
   private readonly lockPath: string
+  private readonly lockTimeout: number
   private readonly dimension: number
   private readonly readOnly: boolean
 
   private readonly wal: Wal
   private readonly index: KeyIndex
-  private readonly fileLock: FileLock | null
   private readonly writeMutex: Mutex
-  private readonly writeBatcher: WriteBatcher | null
 
   private dataHandle: FileHandle | null = null
   private dataHandlePromise: Promise<FileHandle> | null = null
@@ -54,30 +55,31 @@ export class StorageEngine {
     dataPath: string,
     walPath: string,
     lockPath: string,
+    lockTimeout: number,
     dimension: number,
     wal: Wal,
     index: KeyIndex,
-    fileLock: FileLock | null,
     sequenceCounter: bigint,
-    writeBatcher: WriteBatcher | null,
     readOnly: boolean
   ) {
     this.dataPath = dataPath
     this.walPath = walPath
     this.lockPath = lockPath
+    this.lockTimeout = lockTimeout
     this.dimension = dimension
     this.wal = wal
     this.index = index
-    this.fileLock = fileLock
     this.writeMutex = new Mutex()
     this.sequenceCounter = sequenceCounter
-    this.writeBatcher = writeBatcher
     this.readOnly = readOnly
   }
 
   /**
    * Create or open a storage engine.
    * Performs recovery if WAL exists.
+   *
+   * Note: Creating an engine does NOT acquire any lock. Locks are acquired
+   * per write operation and released immediately after.
    */
   static async create(options: StorageEngineOptions): Promise<StorageEngine> {
     const basePath = options.dataPath.replace(/\.[^.]+$/, '') // Remove extension if present
@@ -85,6 +87,7 @@ export class StorageEngine {
     const walPath = basePath + fileExtensions.wal
     const lockPath = basePath + fileExtensions.lock
     const dimension = options.dimension ?? 384
+    const lockTimeout = options.lockTimeout ?? 10000
     const readOnly = options.readOnly ?? false
 
     // Ensure directory exists (only for write mode)
@@ -101,62 +104,34 @@ export class StorageEngine {
       }
     }
 
-    // Acquire exclusive lock (skip for read-only mode)
-    let fileLock: FileLock | null = null
+    // Check if we need migration from v1 (skip for read-only mode)
     if (!readOnly) {
-      fileLock = new FileLock(lockPath, options.lockTimeout)
-      await fileLock.acquire()
-    }
-
-    try {
-      // Check if we need migration from v1 (skip for read-only mode)
-      if (!readOnly) {
-        const needsMigration = await StorageEngine.checkNeedsMigration(dataPath)
-        if (needsMigration) {
-          // Migration will be handled separately
-          throw new Error(
-            `Database at ${dataPath} uses old format (v1). Please run migration first.`
-          )
-        }
-      }
-
-      // Create WAL instance (read-only mode uses it only for recovery)
-      const wal = new Wal(walPath, readOnly)
-
-      // Build index from WAL (handles fresh database case)
-      const { index, maxSequence } = await KeyIndex.buildFromWal(wal, dataPath)
-
-      // Create write batcher if enabled (default: true) and not read-only
-      let writeBatcher: WriteBatcher | null = null
-      if (!readOnly && options.batchingEnabled !== false) {
-        writeBatcher = new WriteBatcher(
-          dataPath,
-          wal,
-          index,
-          dimension,
-          options.batchOptions
+      const needsMigration = await StorageEngine.checkNeedsMigration(dataPath)
+      if (needsMigration) {
+        // Migration will be handled separately
+        throw new Error(
+          `Database at ${dataPath} uses old format (v1). Please run migration first.`
         )
-        await writeBatcher.initialize()
       }
-
-      return new StorageEngine(
-        dataPath,
-        walPath,
-        lockPath,
-        dimension,
-        wal,
-        index,
-        fileLock,
-        maxSequence + 1n,
-        writeBatcher,
-        readOnly
-      )
-    } catch (error) {
-      if (fileLock) {
-        await fileLock.release()
-      }
-      throw error
     }
+
+    // Create WAL instance (read-only mode uses it only for recovery)
+    const wal = new Wal(walPath, readOnly)
+
+    // Build index from WAL (handles fresh database case)
+    const { index, maxSequence } = await KeyIndex.buildFromWal(wal, dataPath)
+
+    return new StorageEngine(
+      dataPath,
+      walPath,
+      lockPath,
+      lockTimeout,
+      dimension,
+      wal,
+      index,
+      maxSequence + 1n,
+      readOnly
+    )
   }
 
   /**
@@ -185,7 +160,10 @@ export class StorageEngine {
 
   /**
    * Write a record to storage.
-   * Implements: data → fsync → WAL → fsync → index
+   * Implements: lock → data → fsync → WAL → fsync → index → unlock
+   *
+   * Acquires a file lock for the duration of the write operation,
+   * then releases it immediately after.
    */
   async writeRecord(
     key: string,
@@ -202,116 +180,54 @@ export class StorageEngine {
       )
     }
 
-    if (this.writeBatcher) {
-      return this.writeRecordBatched(key, embedding, op, this.writeBatcher)
-    }
-
-    return this.writeRecordImmediate(key, embedding, op)
-  }
-
-  /**
-   * Write a record using the batcher for improved throughput.
-   */
-  private async writeRecordBatched(
-    key: string,
-    embedding: Float32Array,
-    op: OpType,
-    batcher: WriteBatcher
-  ): Promise<void> {
+    // In-process serialization via mutex
     await this.writeMutex.acquire()
 
-    let sequenceNumber: bigint
-    let recordData: Uint8Array
-    let offset: number
-
     try {
-      sequenceNumber = this.sequenceCounter++
-      const timestamp = BigInt(Date.now())
+      // Acquire file lock for this write operation
+      const fileLock = new FileLock(this.lockPath, this.lockTimeout)
+      await fileLock.acquire()
 
-      // 1. Serialize data record
-      const record: DataRecord = {
-        opType: op,
-        sequenceNumber,
-        timestamp,
-        key,
-        dimension: this.dimension,
-        embedding
-      }
-      recordData = serializeDataRecord(record)
+      try {
+        const sequenceNumber = this.sequenceCounter++
+        const timestamp = BigInt(Date.now())
 
-      // 2. Calculate offset (batcher tracks cumulative file size)
-      offset = batcher.calculateNextOffset(recordData.length)
-    } finally {
-      this.writeMutex.release()
-    }
+        // 1. Serialize data record
+        const record: DataRecord = {
+          opType: op,
+          sequenceNumber,
+          timestamp,
+          key,
+          dimension: this.dimension,
+          embedding
+        }
+        const recordData = serializeDataRecord(record)
 
-    // 3. Queue write and wait for flush
-    return new Promise<void>((resolve, reject) => {
-      batcher.queueWrite({
-        dataRecord: recordData,
-        walEntry: {
+        // 2. Write to data file and fsync
+        const offset = await this.appendToDataFile(recordData)
+
+        // 3. Write WAL entry and fsync (COMMIT POINT)
+        await this.wal.append({
           opType: op,
           sequenceNumber,
           offset,
           length: recordData.length,
           keyHash: hashKey(key)
-        },
-        key,
-        op,
-        resolve,
-        reject
-      })
-    })
-  }
+        })
 
-  /**
-   * Write a record immediately (non-batched).
-   * Implements: data → fsync → WAL → fsync → index
-   */
-  private async writeRecordImmediate(
-    key: string,
-    embedding: Float32Array,
-    op: OpType
-  ): Promise<void> {
-    await this.writeMutex.acquire()
-
-    try {
-      const sequenceNumber = this.sequenceCounter++
-      const timestamp = BigInt(Date.now())
-
-      // 1. Serialize data record
-      const record: DataRecord = {
-        opType: op,
-        sequenceNumber,
-        timestamp,
-        key,
-        dimension: this.dimension,
-        embedding
+        // 4. Update in-memory index
+        this.index.apply(
+          key,
+          {
+            offset,
+            length: recordData.length,
+            sequenceNumber
+          },
+          op
+        )
+      } finally {
+        await fileLock.release()
       }
-      const recordData = serializeDataRecord(record)
-
-      // 2. Write to data file and fsync
-      const offset = await this.appendToDataFile(recordData)
-
-      // 3. Write WAL entry and fsync (COMMIT POINT)
-      await this.wal.append({
-        opType: op,
-        sequenceNumber,
-        offset,
-        length: recordData.length,
-        keyHash: hashKey(key)
-      })
-
-      // 4. Update in-memory index
-      this.index.apply(
-        key,
-        {
-          offset,
-          length: recordData.length,
-          sequenceNumber
-        },
-        op
-      )
     } finally {
       this.writeMutex.release()
     }
@@ -408,34 +324,14 @@ export class StorageEngine {
   }
 
   /**
-   * Force flush all pending writes to disk.
-   * Only needed when using batching and you need explicit durability.
-   */
-  async flush(): Promise<void> {
-    if (this.writeBatcher) {
-      await this.writeBatcher.forceFlush()
-    }
-  }
-
-  /**
    * Close the storage engine.
    */
   async close(): Promise<void> {
-    // Flush and close the batcher first
-    if (this.writeBatcher) {
-      await this.writeBatcher.close()
-    }
-
     if (this.dataHandle) {
       await this.dataHandle.close()
       this.dataHandle = null
     }
     await this.wal.close()
-
-    // Only release lock if we acquired one (not in read-only mode)
-    if (this.fileLock) {
-      await this.fileLock.release()
-    }
   }
 
   /**

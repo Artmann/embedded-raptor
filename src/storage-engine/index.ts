@@ -13,7 +13,6 @@ export {
   LockPermissionError
 } from './file-lock'
 export { Mutex } from './mutex'
-export { WriteBatcher } from './write-batcher'
 
 // Types
 export type {
@@ -24,11 +23,8 @@ export type {
   StorageEngineOptions,
   DeserializeDataResult,
   DeserializeWalResult,
-  DataFileHeader,
-  WriteBatcherOptions
+  DataFileHeader
 } from './types'
-
-export type { PendingWrite, FlushResult } from './write-batch'
 
 // Constants
 export {
